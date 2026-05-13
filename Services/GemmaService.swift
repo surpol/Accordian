@@ -12,7 +12,14 @@ protocol GemmaService {
     var modelName: String { get }
 
     func reply(to messages: [GemmaMessage]) async throws -> String
+    func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String
     func isModelInstalled() async throws -> Bool
+}
+
+extension GemmaService {
+    func reply(to messages: [GemmaMessage]) async throws -> String {
+        try await reply(to: messages, timeout: nil)
+    }
 }
 
 struct OllamaGemmaService: GemmaService {
@@ -31,6 +38,10 @@ struct OllamaGemmaService: GemmaService {
     }
 
     func reply(to messages: [GemmaMessage]) async throws -> String {
+        try await reply(to: messages, timeout: nil)
+    }
+
+    func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String {
         let requestBody = OllamaChatRequest(
             model: model,
             messages: [
@@ -39,12 +50,13 @@ struct OllamaGemmaService: GemmaService {
                     content: "You are Accordian, a private offline notes assistant for students. Answer from saved notes when they are relevant. Keep answers concise and natural to speak out loud."
                 )
             ] + messages,
-            stream: false
+            stream: false,
+            think: false
         )
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 20
+        request.timeoutInterval = timeout ?? 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(requestBody)
 
@@ -79,6 +91,10 @@ final class OnDeviceModelService: GemmaService {
     var modelName: String { "Apple Intelligence" }
 
     func reply(to messages: [GemmaMessage]) async throws -> String {
+        try await reply(to: messages, timeout: nil)
+    }
+
+    func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String {
         var instructionParts = [
             "You are Accordian, a private offline learning assistant.",
             "Help the user learn through clear explanations, short study plans, and one-question-at-a-time quizzes.",
@@ -119,6 +135,10 @@ struct OnDeviceGemmaServicePlaceholder: GemmaService {
     }
 
     func reply(to messages: [GemmaMessage]) async throws -> String {
+        try await reply(to: messages, timeout: nil)
+    }
+
+    func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String {
         throw GemmaServiceError.onDeviceRuntimeUnavailable
     }
 
@@ -131,6 +151,7 @@ private struct OllamaChatRequest: Codable {
     let model: String
     let messages: [GemmaMessage]
     let stream: Bool
+    let think: Bool
 }
 
 private struct OllamaChatResponse: Codable {

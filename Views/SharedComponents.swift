@@ -103,6 +103,46 @@ struct EmptyInlineState: View {
     }
 }
 
+struct QuizBuildProgressView: View {
+    let progress: QuizBuildProgress
+    var compact = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "hourglass")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.teal)
+                    .frame(width: 14)
+
+                Text(progress.stage.title)
+                    .font((compact ? Font.caption : Font.subheadline).weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Text(progress.percentText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.teal)
+                    .monospacedDigit()
+            }
+
+            ProgressView(value: progress.clampedProgress)
+                .tint(.teal)
+
+            if compact == false {
+                Text(progress.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(progress.stage.title), \(progress.percentText). \(progress.detail)")
+    }
+}
+
 struct MasteryRing: View {
     let snapshot: MasterySnapshot
     var size: CGFloat = 92

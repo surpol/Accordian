@@ -64,7 +64,10 @@ final class ConversationStore {
 
     func loadSources() -> [StudySource] {
         let sql = """
-        SELECT id, title, type, status, text, created_at
+        SELECT id, title, type, status, text, summary,
+               quiz_build_state, quiz_build_detail, quiz_build_error,
+               quiz_build_target_count, quiz_build_saved_count, quiz_build_updated_at,
+               created_at
         FROM study_sources
         ORDER BY created_at DESC
         """
@@ -92,7 +95,19 @@ final class ConversationStore {
             let typeString = String(cString: typeText)
             let statusString = String(cString: statusText)
             let text = String(cString: bodyText)
-            let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
+            let summary = sqlite3_column_text(statement, 5).map { String(cString: $0) } ?? ""
+            let quizBuildStateString = sqlite3_column_text(statement, 6).map { String(cString: $0) } ?? ""
+            let quizBuildDetail = sqlite3_column_text(statement, 7).map { String(cString: $0) } ?? ""
+            let quizBuildError = sqlite3_column_text(statement, 8).map { String(cString: $0) } ?? ""
+            let quizBuildTargetCount = Int(sqlite3_column_int(statement, 9))
+            let quizBuildSavedCount = Int(sqlite3_column_int(statement, 10))
+            let quizBuildUpdatedAt: Date?
+            if sqlite3_column_type(statement, 11) == SQLITE_NULL {
+                quizBuildUpdatedAt = nil
+            } else {
+                quizBuildUpdatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+            }
+            let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 12))
 
             guard
                 let id = UUID(uuidString: idString),
@@ -102,7 +117,25 @@ final class ConversationStore {
             }
 
             let status = StudySource.ProcessingStatus(rawValue: statusString) ?? .ready
-            sources.append(StudySource(id: id, title: title, type: type, status: status, text: text, createdAt: createdAt))
+            let quizBuildState = StudySource.QuizBuildState(rawValue: quizBuildStateString)
+                ?? Self.defaultQuizBuildState(status: status, savedCount: quizBuildSavedCount)
+            sources.append(
+                StudySource(
+                    id: id,
+                    title: title,
+                    type: type,
+                    status: status,
+                    text: text,
+                    summary: summary,
+                    quizBuildState: quizBuildState,
+                    quizBuildDetail: quizBuildDetail,
+                    quizBuildError: quizBuildError,
+                    quizBuildTargetCount: quizBuildTargetCount,
+                    quizBuildSavedCount: quizBuildSavedCount,
+                    quizBuildUpdatedAt: quizBuildUpdatedAt,
+                    createdAt: createdAt
+                )
+            )
         }
 
         return sources
@@ -325,7 +358,7 @@ final class ConversationStore {
 
     func loadQuestions() -> [LearningQuestion] {
         let sql = """
-        SELECT id, source_id, topic_id, segment_id, topic_title, subtopic_title, question_type, prompt, answer, choices, importance, difficulty, created_at
+        SELECT id, source_id, topic_id, segment_id, topic_title, subtopic_title, question_type, prompt, answer, accepted_answers, grading_rubric, choices, importance, difficulty, created_at
         FROM learning_questions
         ORDER BY created_at DESC
         """
@@ -360,7 +393,10 @@ final class ConversationStore {
             let segmentID = sqlite3_column_text(statement, 3)
                 .map { String(cString: $0) }
                 .flatMap(UUID.init(uuidString:))
-            let choicesText = sqlite3_column_text(statement, 9).map { String(cString: $0) } ?? ""
+            let acceptedAnswersText = sqlite3_column_text(statement, 9).map { String(cString: $0) } ?? ""
+            let acceptedAnswers = acceptedAnswersText.components(separatedBy: "\n").filter { $0.isEmpty == false }
+            let gradingRubric = sqlite3_column_text(statement, 10).map { String(cString: $0) } ?? ""
+            let choicesText = sqlite3_column_text(statement, 11).map { String(cString: $0) } ?? ""
             let choices = choicesText.components(separatedBy: "\n").filter { $0.isEmpty == false }
 
             questions.append(
@@ -374,10 +410,12 @@ final class ConversationStore {
                     type: type,
                     prompt: String(cString: promptText),
                     answer: String(cString: answerText),
+                    acceptedAnswers: acceptedAnswers,
+                    gradingRubric: gradingRubric,
                     choices: choices,
-                    importance: sqlite3_column_double(statement, 10),
-                    difficulty: sqlite3_column_double(statement, 11),
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 12))
+                    importance: sqlite3_column_double(statement, 12),
+                    difficulty: sqlite3_column_double(statement, 13),
+                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 14))
                 )
             )
         }
@@ -495,7 +533,7 @@ final class ConversationStore {
 
     func loadAttempts() -> [QuestionAttempt] {
         let sql = """
-        SELECT id, question_id, response, score, created_at
+        SELECT id, question_id, response, score, feedback, matched_ideas, missing_ideas, created_at
         FROM question_attempts
         ORDER BY created_at DESC
         """
@@ -524,7 +562,10 @@ final class ConversationStore {
                     questionID: questionID,
                     response: String(cString: responseText),
                     score: sqlite3_column_double(statement, 3),
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+                    feedback: Self.optionalString(statement, column: 4),
+                    matchedIdeas: Self.decodeStringArray(Self.optionalString(statement, column: 5)),
+                    missingIdeas: Self.decodeStringArray(Self.optionalString(statement, column: 6)),
+                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
                 )
             )
         }
@@ -532,9 +573,55 @@ final class ConversationStore {
         return attempts
     }
 
+    func loadRecentAttemptPrompts(sourceID: UUID?, since: Date, minimumScore: Double) -> [String] {
+        let sql: String
+        if sourceID == nil {
+            sql = """
+            SELECT prompt
+            FROM question_attempts
+            WHERE prompt IS NOT NULL
+              AND TRIM(prompt) != ''
+              AND score >= ?
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            """
+        } else {
+            sql = """
+            SELECT prompt
+            FROM question_attempts
+            WHERE prompt IS NOT NULL
+              AND TRIM(prompt) != ''
+              AND score >= ?
+              AND created_at >= ?
+              AND source_id = ?
+            ORDER BY created_at DESC
+            """
+        }
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return []
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_double(statement, 1, minimumScore)
+        sqlite3_bind_double(statement, 2, since.timeIntervalSince1970)
+        if let sourceID {
+            sqlite3_bind_text(statement, 3, sourceID.uuidString, -1, sqliteTransient)
+        }
+
+        var prompts: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let promptText = sqlite3_column_text(statement, 0) else { continue }
+            prompts.append(String(cString: promptText))
+        }
+
+        return prompts
+    }
+
     func loadQuizHistory() -> [QuizHistoryEntry] {
         let sql = """
-        SELECT id, source_id, title, score, question_count, got_count, close_count, review_count, created_at
+        SELECT id, source_id, title, score, question_count, got_count, close_count, review_count, attempt_ids, created_at
         FROM quiz_sessions
         ORDER BY created_at DESC
         """
@@ -569,7 +656,8 @@ final class ConversationStore {
                     gotCount: Int(sqlite3_column_int(statement, 5)),
                     closeCount: Int(sqlite3_column_int(statement, 6)),
                     reviewCount: Int(sqlite3_column_int(statement, 7)),
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 8))
+                    attemptIDs: Self.decodeUUIDArray(Self.optionalString(statement, column: 8)),
+                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 9))
                 )
             )
         }
@@ -599,8 +687,13 @@ final class ConversationStore {
 
     func save(_ source: StudySource) {
         let sql = """
-        INSERT OR REPLACE INTO study_sources (id, title, type, status, text, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO study_sources (
+            id, title, type, status, text, summary,
+            quiz_build_state, quiz_build_detail, quiz_build_error,
+            quiz_build_target_count, quiz_build_saved_count, quiz_build_updated_at,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         var statement: OpaquePointer?
@@ -614,7 +707,18 @@ final class ConversationStore {
         sqlite3_bind_text(statement, 3, source.type.rawValue, -1, sqliteTransient)
         sqlite3_bind_text(statement, 4, source.status.rawValue, -1, sqliteTransient)
         sqlite3_bind_text(statement, 5, source.text, -1, sqliteTransient)
-        sqlite3_bind_double(statement, 6, source.createdAt.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 6, source.summary, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 7, source.quizBuildState.rawValue, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 8, source.quizBuildDetail, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 9, source.quizBuildError, -1, sqliteTransient)
+        sqlite3_bind_int(statement, 10, Int32(source.quizBuildTargetCount))
+        sqlite3_bind_int(statement, 11, Int32(source.quizBuildSavedCount))
+        if let quizBuildUpdatedAt = source.quizBuildUpdatedAt {
+            sqlite3_bind_double(statement, 12, quizBuildUpdatedAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(statement, 12)
+        }
+        sqlite3_bind_double(statement, 13, source.createdAt.timeIntervalSince1970)
         sqlite3_step(statement)
     }
 
@@ -632,6 +736,107 @@ final class ConversationStore {
         defer { sqlite3_finalize(statement) }
 
         sqlite3_bind_text(statement, 1, status.rawValue, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, id.uuidString, -1, sqliteTransient)
+        sqlite3_step(statement)
+    }
+
+    func updateQuizBuildState(
+        id: UUID,
+        state: StudySource.QuizBuildState,
+        detail: String,
+        error: String,
+        targetCount: Int,
+        savedCount: Int,
+        stage: String
+    ) {
+        let updatedAt = Date.now
+        let sql = """
+        UPDATE study_sources
+        SET quiz_build_state = ?,
+            quiz_build_detail = ?,
+            quiz_build_error = ?,
+            quiz_build_target_count = ?,
+            quiz_build_saved_count = ?,
+            quiz_build_updated_at = ?
+        WHERE id = ?
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, state.rawValue, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, detail, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, error, -1, sqliteTransient)
+        sqlite3_bind_int(statement, 4, Int32(targetCount))
+        sqlite3_bind_int(statement, 5, Int32(savedCount))
+        sqlite3_bind_double(statement, 6, updatedAt.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 7, id.uuidString, -1, sqliteTransient)
+        sqlite3_step(statement)
+
+        saveQuizBuildAttempt(
+            sourceID: id,
+            state: state,
+            stage: stage,
+            targetCount: targetCount,
+            savedCount: savedCount,
+            detail: detail,
+            error: error,
+            createdAt: updatedAt
+        )
+    }
+
+    private func saveQuizBuildAttempt(
+        sourceID: UUID,
+        state: StudySource.QuizBuildState,
+        stage: String,
+        targetCount: Int,
+        savedCount: Int,
+        detail: String,
+        error: String,
+        createdAt: Date
+    ) {
+        let sql = """
+        INSERT INTO quiz_build_attempts (
+            id, source_id, state, stage, target_count, saved_count, detail, error, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, UUID().uuidString, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, sourceID.uuidString, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, state.rawValue, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 4, stage, -1, sqliteTransient)
+        sqlite3_bind_int(statement, 5, Int32(targetCount))
+        sqlite3_bind_int(statement, 6, Int32(savedCount))
+        sqlite3_bind_text(statement, 7, detail, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 8, error, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 9, createdAt.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func updateSourceSummary(id: UUID, summary: String) {
+        let sql = """
+        UPDATE study_sources
+        SET summary = ?
+        WHERE id = ?
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, summary, -1, sqliteTransient)
         sqlite3_bind_text(statement, 2, id.uuidString, -1, sqliteTransient)
         sqlite3_step(statement)
     }
@@ -757,8 +962,8 @@ final class ConversationStore {
 
     func save(_ question: LearningQuestion) {
         let sql = """
-        INSERT OR REPLACE INTO learning_questions (id, source_id, topic_id, segment_id, topic_title, subtopic_title, question_type, prompt, answer, choices, importance, difficulty, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO learning_questions (id, source_id, topic_id, segment_id, topic_title, subtopic_title, question_type, prompt, answer, accepted_answers, grading_rubric, choices, importance, difficulty, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         var statement: OpaquePointer?
@@ -788,10 +993,12 @@ final class ConversationStore {
         sqlite3_bind_text(statement, 7, question.type.rawValue, -1, sqliteTransient)
         sqlite3_bind_text(statement, 8, question.prompt, -1, sqliteTransient)
         sqlite3_bind_text(statement, 9, question.answer, -1, sqliteTransient)
-        sqlite3_bind_text(statement, 10, question.choices.joined(separator: "\n"), -1, sqliteTransient)
-        sqlite3_bind_double(statement, 11, question.importance)
-        sqlite3_bind_double(statement, 12, question.difficulty)
-        sqlite3_bind_double(statement, 13, question.createdAt.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 10, question.acceptedAnswers.joined(separator: "\n"), -1, sqliteTransient)
+        sqlite3_bind_text(statement, 11, question.gradingRubric, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 12, question.choices.joined(separator: "\n"), -1, sqliteTransient)
+        sqlite3_bind_double(statement, 13, question.importance)
+        sqlite3_bind_double(statement, 14, question.difficulty)
+        sqlite3_bind_double(statement, 15, question.createdAt.timeIntervalSince1970)
         sqlite3_step(statement)
     }
 
@@ -834,12 +1041,15 @@ final class ConversationStore {
 
     func save(_ attempt: QuestionAttempt) {
         let sql = """
-        INSERT INTO question_attempts (id, question_id, response, score, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO question_attempts (id, question_id, response, score, feedback, matched_ideas, missing_ideas, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             question_id = excluded.question_id,
             response = excluded.response,
             score = excluded.score,
+            feedback = excluded.feedback,
+            matched_ideas = excluded.matched_ideas,
+            missing_ideas = excluded.missing_ideas,
             created_at = excluded.created_at
         """
 
@@ -853,7 +1063,10 @@ final class ConversationStore {
         sqlite3_bind_text(statement, 2, attempt.questionID.uuidString, -1, sqliteTransient)
         sqlite3_bind_text(statement, 3, attempt.response, -1, sqliteTransient)
         sqlite3_bind_double(statement, 4, attempt.score)
-        sqlite3_bind_double(statement, 5, attempt.createdAt.timeIntervalSince1970)
+        bindOptionalText(statement, index: 5, value: attempt.feedback)
+        sqlite3_bind_text(statement, 6, Self.encodeStringArray(attempt.matchedIdeas), -1, sqliteTransient)
+        sqlite3_bind_text(statement, 7, Self.encodeStringArray(attempt.missingIdeas), -1, sqliteTransient)
+        sqlite3_bind_double(statement, 8, attempt.createdAt.timeIntervalSince1970)
         sqlite3_step(statement)
     }
 
@@ -861,9 +1074,9 @@ final class ConversationStore {
         let sql = """
         INSERT INTO question_attempts (
             id, question_id, source_id, topic_title, subtopic_title, question_type,
-            prompt, answer, response, score, created_at
+            prompt, answer, response, score, feedback, matched_ideas, missing_ideas, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             question_id = excluded.question_id,
             source_id = excluded.source_id,
@@ -874,6 +1087,9 @@ final class ConversationStore {
             answer = excluded.answer,
             response = excluded.response,
             score = excluded.score,
+            feedback = excluded.feedback,
+            matched_ideas = excluded.matched_ideas,
+            missing_ideas = excluded.missing_ideas,
             created_at = excluded.created_at
         """
 
@@ -897,16 +1113,19 @@ final class ConversationStore {
         sqlite3_bind_text(statement, 8, question.answer, -1, sqliteTransient)
         sqlite3_bind_text(statement, 9, attempt.response, -1, sqliteTransient)
         sqlite3_bind_double(statement, 10, attempt.score)
-        sqlite3_bind_double(statement, 11, attempt.createdAt.timeIntervalSince1970)
+        bindOptionalText(statement, index: 11, value: attempt.feedback)
+        sqlite3_bind_text(statement, 12, Self.encodeStringArray(attempt.matchedIdeas), -1, sqliteTransient)
+        sqlite3_bind_text(statement, 13, Self.encodeStringArray(attempt.missingIdeas), -1, sqliteTransient)
+        sqlite3_bind_double(statement, 14, attempt.createdAt.timeIntervalSince1970)
         sqlite3_step(statement)
     }
 
     func save(_ quiz: QuizHistoryEntry) {
         let sql = """
         INSERT OR REPLACE INTO quiz_sessions (
-            id, source_id, title, score, question_count, got_count, close_count, review_count, created_at
+            id, source_id, title, score, question_count, got_count, close_count, review_count, attempt_ids, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         var statement: OpaquePointer?
@@ -927,7 +1146,302 @@ final class ConversationStore {
         sqlite3_bind_int(statement, 6, Int32(quiz.gotCount))
         sqlite3_bind_int(statement, 7, Int32(quiz.closeCount))
         sqlite3_bind_int(statement, 8, Int32(quiz.reviewCount))
-        sqlite3_bind_double(statement, 9, quiz.createdAt.timeIntervalSince1970)
+        sqlite3_bind_text(statement, 9, quiz.attemptIDs.map(\.uuidString).joined(separator: "\n"), -1, sqliteTransient)
+        sqlite3_bind_double(statement, 10, quiz.createdAt.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveInteractionEvent(
+        kind: String,
+        sourceID: UUID? = nil,
+        questionID: UUID? = nil,
+        quizID: UUID? = nil,
+        conceptSignature: String? = nil,
+        detail: String = "",
+        metadata: String = "{}",
+        createdAt: Date = .now
+    ) {
+        let sql = """
+        INSERT INTO learning_events (
+            id, kind, source_id, question_id, quiz_id, concept_signature, detail, metadata, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, UUID().uuidString, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, kind, -1, sqliteTransient)
+        bindOptionalText(statement, index: 3, value: sourceID?.uuidString)
+        bindOptionalText(statement, index: 4, value: questionID?.uuidString)
+        bindOptionalText(statement, index: 5, value: quizID?.uuidString)
+        bindOptionalText(statement, index: 6, value: conceptSignature)
+        sqlite3_bind_text(statement, 7, detail, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 8, metadata, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 9, createdAt.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveQuestionMemory(
+        questionID: UUID,
+        sourceID: UUID?,
+        conceptSignature: String,
+        assessmentAngle: String,
+        generationSource: String,
+        qualityFlags: [String],
+        latestScore: Double?,
+        attemptCount: Int,
+        lastSeenAt: Date?,
+        status: String
+    ) {
+        let sql = """
+        INSERT INTO question_memory (
+            question_id, source_id, concept_signature, assessment_angle, generation_source,
+            quality_flags, latest_score, attempt_count, last_seen_at, status, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(question_id) DO UPDATE SET
+            source_id = excluded.source_id,
+            concept_signature = excluded.concept_signature,
+            assessment_angle = excluded.assessment_angle,
+            generation_source = excluded.generation_source,
+            quality_flags = excluded.quality_flags,
+            latest_score = excluded.latest_score,
+            attempt_count = excluded.attempt_count,
+            last_seen_at = excluded.last_seen_at,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, questionID.uuidString, -1, sqliteTransient)
+        bindOptionalText(statement, index: 2, value: sourceID?.uuidString)
+        sqlite3_bind_text(statement, 3, conceptSignature, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 4, assessmentAngle, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 5, generationSource, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 6, Self.encodeStringArray(qualityFlags), -1, sqliteTransient)
+        if let latestScore {
+            sqlite3_bind_double(statement, 7, latestScore)
+        } else {
+            sqlite3_bind_null(statement, 7)
+        }
+        sqlite3_bind_int(statement, 8, Int32(attemptCount))
+        if let lastSeenAt {
+            sqlite3_bind_double(statement, 9, lastSeenAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(statement, 9)
+        }
+        sqlite3_bind_text(statement, 10, status, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 11, Date.now.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveConceptMemory(
+        sourceID: UUID?,
+        conceptSignature: String,
+        topicTitle: String,
+        subtopicTitle: String,
+        assessmentAngle: String,
+        latestScore: Double?,
+        averageScore: Double?,
+        attemptCount: Int,
+        lastSeenAt: Date?,
+        nextDueAt: Date?,
+        state: String,
+        dueReason: String
+    ) {
+        let sql = """
+        INSERT INTO concept_memory (
+            source_id, concept_signature, topic_title, subtopic_title, assessment_angle,
+            latest_score, average_score, attempt_count, last_seen_at, next_due_at,
+            state, due_reason, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, concept_signature) DO UPDATE SET
+            topic_title = excluded.topic_title,
+            subtopic_title = excluded.subtopic_title,
+            assessment_angle = excluded.assessment_angle,
+            latest_score = excluded.latest_score,
+            average_score = excluded.average_score,
+            attempt_count = excluded.attempt_count,
+            last_seen_at = excluded.last_seen_at,
+            next_due_at = excluded.next_due_at,
+            state = excluded.state,
+            due_reason = excluded.due_reason,
+            updated_at = excluded.updated_at
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        bindOptionalText(statement, index: 1, value: sourceID?.uuidString ?? "global")
+        sqlite3_bind_text(statement, 2, conceptSignature, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, topicTitle, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 4, subtopicTitle, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 5, assessmentAngle, -1, sqliteTransient)
+        if let latestScore {
+            sqlite3_bind_double(statement, 6, latestScore)
+        } else {
+            sqlite3_bind_null(statement, 6)
+        }
+        if let averageScore {
+            sqlite3_bind_double(statement, 7, averageScore)
+        } else {
+            sqlite3_bind_null(statement, 7)
+        }
+        sqlite3_bind_int(statement, 8, Int32(attemptCount))
+        if let lastSeenAt {
+            sqlite3_bind_double(statement, 9, lastSeenAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(statement, 9)
+        }
+        if let nextDueAt {
+            sqlite3_bind_double(statement, 10, nextDueAt.timeIntervalSince1970)
+        } else {
+            sqlite3_bind_null(statement, 10)
+        }
+        sqlite3_bind_text(statement, 11, state, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 12, dueReason, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 13, Date.now.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveQuizMemory(
+        quizID: UUID,
+        sourceID: UUID?,
+        title: String,
+        selectedFocus: String?,
+        reason: String,
+        targetConcepts: String,
+        avoidedConcepts: String,
+        questionMix: String,
+        modelName: String,
+        promptVersion: String
+    ) {
+        let sql = """
+        INSERT OR REPLACE INTO quiz_memory (
+            quiz_id, source_id, title, selected_focus, reason, target_concepts,
+            avoided_concepts, question_mix, model_name, prompt_version, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, quizID.uuidString, -1, sqliteTransient)
+        bindOptionalText(statement, index: 2, value: sourceID?.uuidString)
+        sqlite3_bind_text(statement, 3, title, -1, sqliteTransient)
+        bindOptionalText(statement, index: 4, value: selectedFocus)
+        sqlite3_bind_text(statement, 5, reason, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 6, targetConcepts, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 7, avoidedConcepts, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 8, questionMix, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 9, modelName, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 10, promptVersion, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 11, Date.now.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveAnswerEvaluation(
+        attemptID: UUID,
+        questionID: UUID,
+        sourceID: UUID?,
+        localScore: Double,
+        modelScore: Double?,
+        finalScore: Double,
+        grader: String,
+        modelName: String,
+        latencyMS: Int?,
+        reason: String
+    ) {
+        let sql = """
+        INSERT OR REPLACE INTO answer_evaluations (
+            attempt_id, question_id, source_id, local_score, model_score, final_score,
+            grader, model_name, latency_ms, reason, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, attemptID.uuidString, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, questionID.uuidString, -1, sqliteTransient)
+        bindOptionalText(statement, index: 3, value: sourceID?.uuidString)
+        sqlite3_bind_double(statement, 4, localScore)
+        if let modelScore {
+            sqlite3_bind_double(statement, 5, modelScore)
+        } else {
+            sqlite3_bind_null(statement, 5)
+        }
+        sqlite3_bind_double(statement, 6, finalScore)
+        sqlite3_bind_text(statement, 7, grader, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 8, modelName, -1, sqliteTransient)
+        if let latencyMS {
+            sqlite3_bind_int(statement, 9, Int32(latencyMS))
+        } else {
+            sqlite3_bind_null(statement, 9)
+        }
+        sqlite3_bind_text(statement, 10, reason, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 11, Date.now.timeIntervalSince1970)
+        sqlite3_step(statement)
+    }
+
+    func saveModelRun(
+        taskType: String,
+        modelName: String,
+        promptVersion: String,
+        inputChars: Int,
+        outputChars: Int,
+        success: Bool,
+        latencyMS: Int,
+        error: String? = nil,
+        metadata: String = "{}"
+    ) {
+        let sql = """
+        INSERT INTO model_runs (
+            id, task_type, model_name, prompt_version, input_chars, output_chars,
+            success, latency_ms, error, metadata, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+            return
+        }
+        defer { sqlite3_finalize(statement) }
+
+        sqlite3_bind_text(statement, 1, UUID().uuidString, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 2, taskType, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 3, modelName, -1, sqliteTransient)
+        sqlite3_bind_text(statement, 4, promptVersion, -1, sqliteTransient)
+        sqlite3_bind_int(statement, 5, Int32(inputChars))
+        sqlite3_bind_int(statement, 6, Int32(outputChars))
+        sqlite3_bind_int(statement, 7, success ? 1 : 0)
+        sqlite3_bind_int(statement, 8, Int32(latencyMS))
+        bindOptionalText(statement, index: 9, value: error)
+        sqlite3_bind_text(statement, 10, metadata, -1, sqliteTransient)
+        sqlite3_bind_double(statement, 11, Date.now.timeIntervalSince1970)
         sqlite3_step(statement)
     }
 
@@ -1036,11 +1550,33 @@ final class ConversationStore {
             type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'ready',
             text TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
+            quiz_build_state TEXT NOT NULL DEFAULT 'idle',
+            quiz_build_detail TEXT NOT NULL DEFAULT '',
+            quiz_build_error TEXT NOT NULL DEFAULT '',
+            quiz_build_target_count INTEGER NOT NULL DEFAULT 0,
+            quiz_build_saved_count INTEGER NOT NULL DEFAULT 0,
+            quiz_build_updated_at REAL,
             created_at REAL NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_study_sources_created_at
         ON study_sources(created_at);
+
+        CREATE TABLE IF NOT EXISTS quiz_build_attempts (
+            id TEXT PRIMARY KEY NOT NULL,
+            source_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT '',
+            target_count INTEGER NOT NULL DEFAULT 0,
+            saved_count INTEGER NOT NULL DEFAULT 0,
+            detail TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_quiz_build_attempts_source_created
+        ON quiz_build_attempts(source_id, created_at);
 
         CREATE TABLE IF NOT EXISTS flashcards (
             id TEXT PRIMARY KEY NOT NULL,
@@ -1133,6 +1669,8 @@ final class ConversationStore {
             question_type TEXT NOT NULL,
             prompt TEXT NOT NULL,
             answer TEXT NOT NULL,
+            accepted_answers TEXT NOT NULL DEFAULT '',
+            grading_rubric TEXT NOT NULL DEFAULT '',
             choices TEXT NOT NULL DEFAULT '',
             importance REAL NOT NULL DEFAULT 1,
             difficulty REAL NOT NULL DEFAULT 1,
@@ -1159,6 +1697,9 @@ final class ConversationStore {
             answer TEXT,
             response TEXT NOT NULL,
             score REAL NOT NULL,
+            feedback TEXT,
+            matched_ideas TEXT NOT NULL DEFAULT '',
+            missing_ideas TEXT NOT NULL DEFAULT '',
             created_at REAL NOT NULL
         );
 
@@ -1198,6 +1739,112 @@ final class ConversationStore {
 
         CREATE INDEX IF NOT EXISTS idx_quiz_sessions_source_created
         ON quiz_sessions(source_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS learning_events (
+            id TEXT PRIMARY KEY NOT NULL,
+            kind TEXT NOT NULL,
+            source_id TEXT,
+            question_id TEXT,
+            quiz_id TEXT,
+            concept_signature TEXT,
+            detail TEXT NOT NULL DEFAULT '',
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_learning_events_kind_created
+        ON learning_events(kind, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_learning_events_source_created
+        ON learning_events(source_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS question_memory (
+            question_id TEXT PRIMARY KEY NOT NULL,
+            source_id TEXT,
+            concept_signature TEXT NOT NULL,
+            assessment_angle TEXT NOT NULL,
+            generation_source TEXT NOT NULL DEFAULT '',
+            quality_flags TEXT NOT NULL DEFAULT '',
+            latest_score REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_seen_at REAL,
+            status TEXT NOT NULL DEFAULT 'untested',
+            updated_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_question_memory_source_concept
+        ON question_memory(source_id, concept_signature);
+
+        CREATE TABLE IF NOT EXISTS concept_memory (
+            source_id TEXT NOT NULL DEFAULT 'global',
+            concept_signature TEXT NOT NULL,
+            topic_title TEXT NOT NULL,
+            subtopic_title TEXT NOT NULL,
+            assessment_angle TEXT NOT NULL,
+            latest_score REAL,
+            average_score REAL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_seen_at REAL,
+            next_due_at REAL,
+            state TEXT NOT NULL DEFAULT 'untested',
+            due_reason TEXT NOT NULL DEFAULT '',
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (source_id, concept_signature)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_concept_memory_state_due
+        ON concept_memory(state, next_due_at);
+
+        CREATE TABLE IF NOT EXISTS quiz_memory (
+            quiz_id TEXT PRIMARY KEY NOT NULL,
+            source_id TEXT,
+            title TEXT NOT NULL,
+            selected_focus TEXT,
+            reason TEXT NOT NULL DEFAULT '',
+            target_concepts TEXT NOT NULL DEFAULT '[]',
+            avoided_concepts TEXT NOT NULL DEFAULT '[]',
+            question_mix TEXT NOT NULL DEFAULT '{}',
+            model_name TEXT NOT NULL DEFAULT '',
+            prompt_version TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_quiz_memory_source_created
+        ON quiz_memory(source_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS answer_evaluations (
+            attempt_id TEXT PRIMARY KEY NOT NULL,
+            question_id TEXT NOT NULL,
+            source_id TEXT,
+            local_score REAL NOT NULL,
+            model_score REAL,
+            final_score REAL NOT NULL,
+            grader TEXT NOT NULL,
+            model_name TEXT NOT NULL DEFAULT '',
+            latency_ms INTEGER,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_answer_evaluations_question
+        ON answer_evaluations(question_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS model_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            task_type TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            prompt_version TEXT NOT NULL DEFAULT '',
+            input_chars INTEGER NOT NULL DEFAULT 0,
+            output_chars INTEGER NOT NULL DEFAULT 0,
+            success INTEGER NOT NULL DEFAULT 0,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_model_runs_task_created
+        ON model_runs(task_type, created_at);
         """
 
         sqlite3_exec(database, sql, nil, nil, nil)
@@ -1214,13 +1861,27 @@ final class ConversationStore {
         sqlite3_exec(database, "ALTER TABLE flashcards ADD COLUMN reference_text TEXT NOT NULL DEFAULT ''", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE messages ADD COLUMN source_titles TEXT NOT NULL DEFAULT ''", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN summary TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_state TEXT NOT NULL DEFAULT 'idle'", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_detail TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_error TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_target_count INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_saved_count INTEGER NOT NULL DEFAULT 0", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE study_sources ADD COLUMN quiz_build_updated_at REAL", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE learning_questions ADD COLUMN topic_id TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE learning_questions ADD COLUMN segment_id TEXT", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE learning_questions ADD COLUMN accepted_answers TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE learning_questions ADD COLUMN grading_rubric TEXT NOT NULL DEFAULT ''", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN source_id TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN topic_title TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN subtopic_title TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN question_type TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN prompt TEXT", nil, nil, nil)
         sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN answer TEXT", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN feedback TEXT", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN matched_ideas TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE question_attempts ADD COLUMN missing_ideas TEXT NOT NULL DEFAULT ''", nil, nil, nil)
+        sqlite3_exec(database, "ALTER TABLE quiz_sessions ADD COLUMN attempt_ids TEXT NOT NULL DEFAULT ''", nil, nil, nil)
         sqlite3_exec(database, "UPDATE study_sources SET type = 'notes' WHERE type = 'pastedText'", nil, nil, nil)
         sqlite3_exec(database, "UPDATE flashcards SET due_at = created_at WHERE due_at = 0", nil, nil, nil)
         sqlite3_exec(database, "UPDATE flashcards SET topic = source_title WHERE topic = 'General' AND source_title != ''", nil, nil, nil)
@@ -1243,6 +1904,71 @@ final class ConversationStore {
     private static func defaultDatabaseURL() -> URL {
         let baseURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return baseURL.appending(path: "Waves", directoryHint: .isDirectory).appending(path: "conversations.sqlite")
+    }
+
+    private static func optionalString(_ statement: OpaquePointer?, column: Int32) -> String? {
+        guard sqlite3_column_type(statement, column) != SQLITE_NULL,
+              let text = sqlite3_column_text(statement, column)
+        else {
+            return nil
+        }
+
+        let value = String(cString: text)
+        return value.isEmpty ? nil : value
+    }
+
+    private static func encodeStringArray(_ values: [String]) -> String {
+        guard values.isEmpty == false,
+              let data = try? JSONEncoder().encode(values),
+              let encoded = String(data: data, encoding: .utf8)
+        else {
+            return ""
+        }
+
+        return encoded
+    }
+
+    private static func decodeStringArray(_ value: String?) -> [String] {
+        guard let value,
+              let data = value.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data)
+        else {
+            return []
+        }
+
+        return decoded
+    }
+
+    private static func decodeUUIDArray(_ value: String?) -> [UUID] {
+        value?
+            .components(separatedBy: .newlines)
+            .compactMap { UUID(uuidString: $0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? []
+    }
+
+    private func bindOptionalText(_ statement: OpaquePointer?, index: Int32, value: String?) {
+        if let value, value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            sqlite3_bind_text(statement, index, value, -1, sqliteTransient)
+        } else {
+            sqlite3_bind_null(statement, index)
+        }
+    }
+
+    private static func defaultQuizBuildState(
+        status: StudySource.ProcessingStatus,
+        savedCount: Int
+    ) -> StudySource.QuizBuildState {
+        if savedCount > 0 {
+            return .ready
+        }
+
+        switch status {
+        case .ready:
+            return .idle
+        case .processing:
+            return .building
+        case .failed:
+            return .failed
+        }
     }
 }
 

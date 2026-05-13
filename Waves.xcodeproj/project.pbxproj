@@ -21,6 +21,7 @@
 		1A0000010000000000000015 /* GemmaService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001016 /* GemmaService.swift */; };
 		1A0000010000000000000016 /* LearningFrameworkObjects.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001017 /* LearningFrameworkObjects.swift */; };
 		1A0000010000000000000017 /* LearningFrameworkAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001018 /* LearningFrameworkAPIs.swift */; };
+		1A0000010000000000000018 /* QuizzesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001019 /* QuizzesView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +41,7 @@
 		1A0000010000000000001016 /* GemmaService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GemmaService.swift; sourceTree = "<group>"; };
 		1A0000010000000000001017 /* LearningFrameworkObjects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LearningFrameworkObjects.swift; sourceTree = "<group>"; };
 		1A0000010000000000001018 /* LearningFrameworkAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LearningFrameworkAPIs.swift; sourceTree = "<group>"; };
+		1A0000010000000000001019 /* QuizzesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuizzesView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -117,6 +119,7 @@
 			children = (
 				1A0000010000000000001012 /* AskView.swift */,
 				1A0000010000000000001013 /* MemoryView.swift */,
+				1A0000010000000000001019 /* QuizzesView.swift */,
 				1A0000010000000000001014 /* SettingsView.swift */,
 				1A0000010000000000001015 /* SharedComponents.swift */,
 			);
@@ -205,6 +208,7 @@
 				1A0000010000000000000015 /* GemmaService.swift in Sources */,
 				1A0000010000000000000016 /* LearningFrameworkObjects.swift in Sources */,
 				1A0000010000000000000017 /* LearningFrameworkAPIs.swift in Sources */,
+				1A0000010000000000000018 /* QuizzesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

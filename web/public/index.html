@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Accordian Web</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">Gemma + SQLite learning system</p>
+          <h1>Accordian</h1>
+          <p class="subtitle">Turn notes into quizzes, feedback, and visible learning evidence.</p>
+        </div>
+        <div class="status" id="modelStatus">Checking model...</div>
+      </header>
+
+      <nav class="tabbar" aria-label="Main navigation">
+        <button class="tab active" data-tab="learn">Learn</button>
+        <button class="tab" data-tab="notes">Notes</button>
+        <button class="tab" data-tab="quizzes">Quizzes</button>
+      </nav>
+
+      <section class="view active" id="learnView">
+        <div class="learn-grid">
+          <aside class="panel stack-panel">
+            <div class="panel-header">
+              <h2>Note Stack</h2>
+              <button class="icon-button" id="refreshButton" title="Refresh">↻</button>
+            </div>
+            <div id="learnNotesList" class="notes-list"></div>
+          </aside>
+
+          <section class="panel main-panel">
+            <div class="panel-header">
+              <div>
+                <h2 id="activeTitle">Choose a note</h2>
+                <p id="activeSummary" class="muted">Add notes, build questions, then start a quiz.</p>
+              </div>
+            </div>
+
+            <div class="metrics">
+              <div>
+                <span id="questionCount">0</span>
+                <p>Questions</p>
+              </div>
+              <div>
+                <span id="attemptCount">0</span>
+                <p>Attempts</p>
+              </div>
+              <div>
+                <span id="understandingScore">0%</span>
+                <p>Understanding</p>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button id="buildButton">Build Quiz Bank</button>
+              <button id="startQuizButton" class="secondary">Start Quiz</button>
+            </div>
+
+            <div id="quizArea" class="quiz-area"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="notesView">
+        <div class="notes-grid">
+          <section class="panel editor-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Add Notes</h2>
+                <p class="muted">Paste text or import a Wikipedia article.</p>
+              </div>
+            </div>
+
+            <section class="wiki-box" aria-label="Wikipedia import">
+              <div>
+                <h3>Wikipedia</h3>
+                <p class="muted">Search a topic and save the article as a note.</p>
+              </div>
+              <div class="wiki-search">
+                <input id="wikiQuery" placeholder="Search Wikipedia" />
+                <button id="wikiSearchButton" type="button" class="secondary">Search</button>
+              </div>
+              <div id="wikiResults" class="wiki-results"></div>
+            </section>
+
+            <form id="noteForm" class="note-form">
+              <input id="noteTitle" placeholder="Note title" />
+              <textarea id="noteBody" placeholder="Paste a text stream here"></textarea>
+              <button type="submit">Save Note</button>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Saved Notes</h2>
+            </div>
+            <div id="notesList" class="notes-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="quizzesView">
+        <div class="quiz-history-layout">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Quiz History</h2>
+                <p class="muted">Tap a session to inspect answers and feedback.</p>
+              </div>
+            </div>
+            <div id="historyList" class="history-list"></div>
+          </section>
+
+          <section class="panel detail-panel">
+            <div id="sessionDetail" class="session-detail">
+              <h2>Select a quiz</h2>
+              <p class="muted">Your attempt details will appear here.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

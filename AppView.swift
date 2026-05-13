@@ -12,7 +12,7 @@ struct AppView: View {
                 }
             }
             .tabItem {
-                Label("Ask", systemImage: "sparkles")
+                Label("Learn", systemImage: "sparkles")
             }
             .tag(AppTab.ask)
 
@@ -26,6 +26,14 @@ struct AppView: View {
                 Label("Notes", systemImage: "tray.full")
             }
             .tag(AppTab.notes)
+
+            NavigationStack {
+                QuizzesView()
+            }
+            .tabItem {
+                Label("Quizzes", systemImage: "checklist")
+            }
+            .tag(AppTab.quizzes)
 
             NavigationStack {
                 SettingsView()
@@ -42,5 +50,6 @@ struct AppView: View {
 private enum AppTab {
     case ask
     case notes
+    case quizzes
     case settings
 }

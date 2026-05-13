@@ -2,285 +2,978 @@ import SwiftUI
 
 struct NotesView: View {
     @EnvironmentObject private var assistant: TutorEngine
-    @State private var isAddingNotes = false
-    @State private var selectedSource: StudySource?
     let onAskFromNotes: (String) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                AppHeader(
-                    title: "Notes",
-                    subtitle: "Saved material and its learning coverage."
-                )
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    NotesHeader()
+                    
+                    if assistant.sources.isEmpty {
+                        EmptyInlineState(
+                            title: "No saved notes",
+                            detail: "Paste class notes, summaries, or lecture transcripts. Accordian stores them locally with SQLite.",
+                            systemImage: "doc.text"
+                        )
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(assistant.sources) { source in
+                                NavigationLink(value: NotesRoute.detail(source.id)) {
+                                    NoteRow(source: source)
+                                }
+                                .buttonStyle(.plain)
 
-                Button {
-                    isAddingNotes = true
-                } label: {
-                    Label("Add Notes", systemImage: "plus")
-                        .frame(maxWidth: .infinity, minHeight: 46)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.teal)
-
-                if assistant.sources.isEmpty {
-                    EmptyInlineState(
-                        title: "No saved notes",
-                        detail: "Paste class notes, summaries, or lecture transcripts. Accordian stores them locally with SQLite.",
-                        systemImage: "doc.text"
-                    )
-                } else {
-                    NotesCoverageSummary(
-                        overall: assistant.masterySnapshot(for: nil),
-                        noteCount: assistant.sources.count,
-                        questionCount: assistant.questions.count,
-                        processingCount: assistant.sources.filter { $0.status == .processing }.count
-                    )
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Saved Notes")
-                            .font(.headline)
-
-                        ForEach(assistant.sources) { source in
-                            Button {
-                                selectedSource = source
-                            } label: {
-                                NoteRow(source: source)
+                                if source.id != assistant.sources.last?.id {
+                                    Divider()
+                                        .padding(.leading, 16)
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
+                        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 10))
                     }
                 }
+                .padding(16)
+                .padding(.bottom, 72)
             }
-            .padding(16)
-            .padding(.bottom, 72)
-        }
-        .background(WavesTheme.background)
-        .sheet(isPresented: $isAddingNotes) {
-            AddNotesSheet()
-        }
-        .sheet(item: $selectedSource) { source in
-            NoteDetailView(source: source) {
-                selectedSource = nil
-                onAskFromNotes("Use \(source.title). Summarize these notes.")
-            } onDelete: {
-                assistant.deleteStudySource(source)
-                selectedSource = nil
+            .background(WavesTheme.background)
+            .navigationDestination(for: NotesRoute.self) { route in
+                switch route {
+                case .add:
+                    AddNotesView()
+                case .detail(let sourceID):
+                    NoteDetailView(sourceID: sourceID)
+                }
             }
         }
     }
 }
 
-private struct NotesCoverageSummary: View {
-    let overall: MasterySnapshot
-    let noteCount: Int
-    let questionCount: Int
-    let processingCount: Int
-
+private struct NotesHeader: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 18) {
-                MasteryRing(snapshot: overall, size: 112, lineWidth: 13)
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Notes")
+                    .font(.largeTitle.weight(.semibold))
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Learning Map")
-                        .font(.headline)
-
-                    Text("\(noteCount) saved notes / \(questionCount) learning checks")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    CoveragePill(tested: overall.testedCount, total: overall.totalCount)
-
-                    if processingCount > 0 {
-                        Label("\(processingCount) building journey", systemImage: "wand.and.stars")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer(minLength: 0)
+                Text("Source material for your quizzes.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
+
+            Spacer(minLength: 16)
+
+            NavigationLink(value: NotesRoute.add) {
+                Image(systemName: "plus")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.teal)
+                    .frame(width: 44, height: 44)
+                    .background(Color(.systemBackground), in: Circle())
+            }
+            .accessibilityLabel("Add Notes")
         }
-        .padding(14)
-        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
     }
+}
+
+private enum NotesRoute: Hashable {
+    case add
+    case detail(UUID)
 }
 
 private struct NoteRow: View {
+    @EnvironmentObject private var assistant: TutorEngine
     let source: StudySource
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: source.type.systemImage)
-                    .foregroundStyle(.teal)
-                    .frame(width: 24)
-
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(source.title)
                     .font(.headline)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
 
-                Spacer(minLength: 0)
+                Text(rowDetail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
 
-                Text(source.type.title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(source.status == .processing ? .teal : .secondary)
+                if let buildProgress {
+                    QuizBuildProgressView(progress: buildProgress, compact: true)
+                        .padding(.top, 4)
+                }
             }
 
-            Text(source.text)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(3)
+            Spacer(minLength: 0)
 
-            if source.status != .ready {
-                Label(source.status == .processing ? "Building journey" : "Basic journey ready", systemImage: source.status == .processing ? "wand.and.stars" : "exclamationmark.triangle")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(source.status == .processing ? .teal : .orange)
-            }
+            Text(statusText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(statusColor)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(statusColor.opacity(0.1), in: Capsule())
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
-        .padding(14)
-        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+    }
+
+    private var rowDetail: String {
+        if let buildProgress {
+            return buildProgress.detail
+        }
+
+        if source.quizBuildState == .building {
+            return source.quizBuildDetail.isEmpty ? "Creating questions from this note" : source.quizBuildDetail
+        }
+
+        if source.quizBuildState == .partial {
+            return source.quizBuildDetail.isEmpty ? "Quiz available. Adding more questions." : source.quizBuildDetail
+        }
+
+        if source.quizBuildState == .failed || source.status == .failed || assistant.modelReadiness.isReady == false {
+            return "Connect the model to create questions"
+        }
+
+        return "\(wordCount.formatted()) words saved"
+    }
+
+    private var wordCount: Int {
+        source.text.split { $0.isWhitespace || $0.isNewline }.count
+    }
+
+    private var statusText: String {
+        if source.quizBuildState == .partial {
+            return availableCheckCount > 0 ? "Ready" : "Building"
+        }
+
+        if buildProgress != nil || source.quizBuildState == .building {
+            return "Building"
+        }
+
+        if availableCheckCount > 0 {
+            return "Ready"
+        }
+
+        if source.quizBuildState == .failed || source.status == .failed || assistant.modelReadiness.isReady == false {
+            return "Needs Model"
+        }
+
+        return "No Questions"
+    }
+
+    private var availableCheckCount: Int {
+        assistant.availableQuizQuestionCount(for: source)
+    }
+
+    private var savedCheckCount: Int {
+        assistant.questions.filter { $0.sourceID == source.id }.count
+    }
+
+    private var buildProgress: QuizBuildProgress? {
+        assistant.quizBuildProgress(for: source)
+    }
+
+    private var isBuildingChecks: Bool {
+        buildProgress != nil
+            || source.quizBuildState == .building
+            || assistant.isPreparingNextQuiz(for: source.id)
+            || (savedCheckCount > 0 && availableCheckCount == 0 && assistant.modelReadiness.isReady)
+    }
+
+    private var statusColor: Color {
+        if availableCheckCount > 0 {
+            return .teal
+        }
+
+        if isBuildingChecks {
+            return .orange
+        }
+
+        return .secondary
     }
 }
 
 private struct NoteDetailView: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var isConfirmingDelete = false
-    let source: StudySource
-    let onAsk: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label(source.type.title, systemImage: source.type.systemImage)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.teal)
-
-                        Text(source.title)
-                            .font(.largeTitle.weight(.semibold))
-                            .lineLimit(3)
-
-                        Text("\(wordCount) words / saved \(source.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button {
-                        onAsk()
-                    } label: {
-                        Label("Ask From These Notes", systemImage: "sparkles")
-                            .frame(maxWidth: .infinity, minHeight: 46)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.teal)
-
-                    Button(role: .destructive) {
-                        isConfirmingDelete = true
-                    } label: {
-                        Label("Delete Notes", systemImage: "trash")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.bordered)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Note Text")
-                            .font(.headline)
-
-                        Text(source.text)
-                            .font(.body)
-                            .lineSpacing(3)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-                .padding(16)
-                .padding(.bottom, 48)
-            }
-            .background(WavesTheme.background)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-            .confirmationDialog("Delete these notes?", isPresented: $isConfirmingDelete, titleVisibility: .visible) {
-                Button("Delete Notes", role: .destructive) {
-                    onDelete()
-                    dismiss()
-                }
-
-                Button("Cancel", role: .cancel) { }
-            } message: {
-                Text("Accordian will stop using these notes. Flashcards generated from them will also be removed.")
-            }
-        }
-    }
-
-    private var wordCount: Int {
-        source.text
-            .split { $0.isWhitespace || $0.isNewline }
-            .count
-    }
-}
-
-private struct AddNotesSheet: View {
-    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var assistant: TutorEngine
-    @State private var title = ""
-    @State private var text = ""
+    @State private var isConfirmingDelete = false
+    @State private var generatedSummary = ""
+    @State private var isGeneratingSummary = false
+    @State private var draftTitle = ""
+    @State private var draftText = ""
     @FocusState private var focusedField: Field?
+    let sourceID: UUID
 
     private enum Field {
         case title
         case text
     }
 
+    private var source: StudySource? {
+        assistant.sources.first { $0.id == sourceID }
+    }
+
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Title") {
-                    TextField("Biology lecture", text: $title)
-                        .focused($focusedField, equals: .title)
-                }
+        Group {
+            if let source {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        noteHeader(source)
 
-                Section("Notes") {
-                    TextEditor(text: $text)
-                        .frame(minHeight: 180)
-                        .focused($focusedField, equals: .text)
+                        summarySection(source)
+
+                        editorSection(source)
+
+                        Button(role: .destructive) {
+                            isConfirmingDelete = true
+                        } label: {
+                            Label("Delete Notes", systemImage: "trash")
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(16)
+                    .padding(.bottom, 24)
                 }
+            } else {
+                EmptyInlineState(
+                    title: "Note not found",
+                    detail: "This note may have been deleted.",
+                    systemImage: "doc.text.magnifyingglass"
+                )
+                .padding(16)
             }
-            .navigationTitle("Add Notes")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+        }
+        .background(WavesTheme.background)
+        .navigationTitle("Note")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
+        .onAppear {
+            loadDraftIfNeeded()
+        }
+        .onChange(of: sourceID) {
+            loadDraftIfNeeded(force: true)
+        }
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    saveChanges()
                 }
+                .disabled(canSave == false)
+            }
 
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        assistant.addStudySource(title: title, text: text)
-                        dismiss()
-                    }
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") {
-                        focusedField = nil
-                    }
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    focusedField = nil
                 }
             }
         }
+        .safeAreaInset(edge: .bottom) {
+            if canSave {
+                Button {
+                    saveChanges()
+                } label: {
+                    Label("Save Notes", systemImage: "checkmark.circle")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.teal)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+                .background(.regularMaterial)
+            }
+        }
+        .confirmationDialog("Delete these notes?", isPresented: $isConfirmingDelete, titleVisibility: .visible) {
+            if let source {
+                Button("Delete Notes", role: .destructive) {
+                    assistant.deleteStudySource(source)
+                    dismiss()
+                }
+            }
+
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Accordian will stop using these notes. Flashcards generated from them will also be removed.")
+        }
+    }
+
+    private func noteHeader(_ source: StudySource) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(source.type.title, systemImage: source.type.systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.teal)
+
+            TextField("Note title", text: $draftTitle)
+                .font(.largeTitle.weight(.semibold))
+                .focused($focusedField, equals: .title)
+                .textFieldStyle(.plain)
+                .lineLimit(2)
+
+            Text("\(wordCount) words / saved \(source.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func summarySection(_ source: StudySource) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Summary")
+                    .font(.headline)
+
+                Spacer()
+
+                Button {
+                    generateSummary(source)
+                } label: {
+                    if isGeneratingSummary {
+                        Label("Generating", systemImage: "sparkles")
+                    } else {
+                        Label(summaryText.isEmpty ? "Generate" : "Regenerate", systemImage: "sparkles")
+                    }
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(isGeneratingSummary || canSave)
+            }
+
+            Text(summaryText.isEmpty ? "Generate a short Gemma summary when you want a condensed picture of these notes." : summaryText)
+                .font(.subheadline)
+                .foregroundStyle(summaryText.isEmpty ? .secondary : .primary)
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func editorSection(_ source: StudySource) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Note Text")
+                    .font(.headline)
+
+                Spacer()
+
+                if canSave {
+                    Text("Unsaved")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+                TextEditor(text: $draftText)
+                    .font(.body)
+                    .lineSpacing(3)
+                    .focused($focusedField, equals: .text)
+                    .autocorrectionDisabled()
+                    .scrollContentBackground(.hidden)
+                    .frame(height: 360)
+                    .padding(10)
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+
+        }
+    }
+
+    private var wordCount: Int {
+        draftText
+            .split { $0.isWhitespace || $0.isNewline }
+            .count
+    }
+
+    private var summaryText: String {
+        generatedSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSave: Bool {
+        guard let source else { return false }
+        let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = draftText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.isEmpty == false else { return false }
+        return title != source.title || text != source.text
+    }
+
+    private func loadDraftIfNeeded(force: Bool = false) {
+        guard let source else { return }
+        guard force || draftTitle.isEmpty && draftText.isEmpty else { return }
+        draftTitle = source.title
+        draftText = source.text
+        generatedSummary = source.summary
+    }
+
+    private func saveChanges() {
+        guard let source, canSave else { return }
+        assistant.updateStudySource(source, title: draftTitle, text: draftText)
+        generatedSummary = ""
+        focusedField = nil
+        dismiss()
+    }
+
+    private func generateSummary(_ source: StudySource) {
+        guard isGeneratingSummary == false else { return }
+        isGeneratingSummary = true
+
+        Task {
+            let summary = await assistant.generateSummary(for: source)
+            generatedSummary = summary
+            isGeneratingSummary = false
+        }
+    }
+}
+
+private struct AddNotesView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var assistant: TutorEngine
+    @State private var title = ""
+    @State private var text = ""
+    @State private var inputMode: NoteInputMode = .paste
+    @State private var wikiQuery = ""
+    @State private var wikiResults: [WikipediaSearchResult] = []
+    @State private var selectedWikiResult: WikipediaSearchResult?
+    @State private var isSearchingWikipedia = false
+    @State private var isImportingWikipedia = false
+    @State private var wikipediaError: String?
+    @FocusState private var focusedField: Field?
+
+    private enum Field {
+        case title
+        case text
+        case wikipediaSearch
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Picker("Input", selection: $inputMode) {
+                    ForEach(NoteInputMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage)
+                            .tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                switch inputMode {
+                case .paste:
+                    pasteInput
+                case .wikipedia:
+                    wikipediaInput
+                }
+            }
+            .padding(16)
+            .padding(.bottom, 92)
+        }
+        .background(WavesTheme.background)
+        .navigationTitle("Add Notes")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
+        .onChange(of: inputMode) {
+            focusedField = nil
+            wikipediaError = nil
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") {
+                    dismiss()
+                }
+            }
+
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    focusedField = nil
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button {
+                saveNotes()
+            } label: {
+                Label(saveButtonTitle, systemImage: "checkmark.circle")
+                    .font(.headline.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 48)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.teal)
+            .disabled(canSave == false)
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .background(.regularMaterial)
+        }
+    }
+
+    private var pasteInput: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Title")
+                    .font(.headline)
+
+                TextField("Biology lecture", text: $title)
+                    .font(.title2.weight(.semibold))
+                    .textFieldStyle(.plain)
+                    .focused($focusedField, equals: .title)
+                    .padding(12)
+                    .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Notes")
+                    .font(.headline)
+
+                TextEditor(text: $text)
+                    .font(.body)
+                    .lineSpacing(3)
+                    .focused($focusedField, equals: .text)
+                    .autocorrectionDisabled()
+                    .scrollContentBackground(.hidden)
+                    .frame(height: 360)
+                    .padding(10)
+                    .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var wikipediaInput: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    TextField("Search Wikipedia", text: $wikiQuery)
+                        .font(.title3.weight(.semibold))
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .focused($focusedField, equals: .wikipediaSearch)
+                        .submitLabel(.search)
+                        .onSubmit(searchWikipedia)
+
+                    Button(action: searchWikipedia) {
+                        if isSearchingWikipedia {
+                            ProgressView()
+                                .controlSize(.small)
+                                .frame(width: 30, height: 30)
+                        } else {
+                            Image(systemName: "arrow.right.circle.fill")
+                                .font(.title3)
+                                .frame(width: 30, height: 30)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.teal)
+                    .disabled(wikiQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSearchingWikipedia)
+                    .accessibilityLabel("Search Wikipedia")
+                }
+                .padding(12)
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+
+                if hasImportedWikipedia == false {
+                    Text("Search Wikipedia, choose an article, then save it as notes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            if let wikipediaError {
+                Label(wikipediaError, systemImage: "exclamationmark.triangle")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if hasImportedWikipedia {
+                ImportedWikipediaCard(
+                    title: title.isEmpty ? "Wikipedia article" : title,
+                    wordCount: wordCount,
+                    preview: text,
+                    onChange: resetWikipediaImport
+                )
+            } else if wikiResults.isEmpty == false {
+                VStack(spacing: 0) {
+                    ForEach(wikiResults.prefix(6)) { result in
+                        Button {
+                            importWikipedia(result)
+                        } label: {
+                            WikipediaResultRow(
+                                result: result,
+                                isSelected: selectedWikiResult?.id == result.id,
+                                isImporting: isImportingWikipedia && selectedWikiResult?.id == result.id
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isImportingWikipedia)
+
+                        if result.id != wikiResults.last?.id {
+                            Divider()
+                                .padding(.leading, 14)
+                        }
+                    }
+                }
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Image(systemName: "globe")
+                        .font(.title2)
+                        .foregroundStyle(.teal)
+
+                    Text("Search, tap an article, save.")
+                        .font(.headline.weight(.semibold))
+
+                    Text("Accordian saves the article locally, then builds quizzes from the text.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private var saveButtonTitle: String {
+        switch inputMode {
+        case .paste:
+            "Save Notes"
+        case .wikipedia:
+            "Save Article"
+        }
+    }
+
+    private var hasImportedWikipedia: Bool {
+        inputMode == .wikipedia && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func saveNotes() {
+        guard canSave else { return }
+        assistant.addStudySource(title: title, text: text, type: inputMode.sourceType)
+        dismiss()
+    }
+
+    private var wordCount: Int {
+        text
+            .split { $0.isWhitespace || $0.isNewline }
+            .count
+    }
+
+    private func searchWikipedia() {
+        let query = wikiQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.isEmpty == false, isSearchingWikipedia == false else { return }
+
+        focusedField = nil
+        isSearchingWikipedia = true
+        wikipediaError = nil
+        selectedWikiResult = nil
+        if inputMode == .wikipedia {
+            title = ""
+            text = ""
+        }
+
+        Task {
+            do {
+                let results = try await WikipediaClient.search(query: query)
+                wikiResults = results
+                if results.isEmpty {
+                    wikipediaError = "No Wikipedia results found."
+                }
+            } catch {
+                wikipediaError = "Wikipedia search failed. Try again."
+            }
+            isSearchingWikipedia = false
+        }
+    }
+
+    private func importWikipedia(_ result: WikipediaSearchResult) {
+        guard isImportingWikipedia == false else { return }
+
+        selectedWikiResult = result
+        isImportingWikipedia = true
+        wikipediaError = nil
+
+        Task {
+            do {
+                let article = try await WikipediaClient.article(for: result)
+                title = article.title
+                text = article.noteText
+            } catch {
+                wikipediaError = "Could not import this article."
+            }
+            isImportingWikipedia = false
+        }
+    }
+
+    private func resetWikipediaImport() {
+        title = ""
+        text = ""
+        selectedWikiResult = nil
+    }
+}
+
+private enum NoteInputMode: String, CaseIterable, Identifiable {
+    case paste
+    case wikipedia
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .paste:
+            "Paste"
+        case .wikipedia:
+            "Wikipedia"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .paste:
+            "doc.text"
+        case .wikipedia:
+            "globe"
+        }
+    }
+
+    var sourceType: StudySource.SourceType {
+        switch self {
+        case .paste:
+            .notes
+        case .wikipedia:
+            .wikipedia
+        }
+    }
+}
+
+private struct WikipediaResultRow: View {
+    let result: WikipediaSearchResult
+    let isSelected: Bool
+    let isImporting: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(result.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+
+                Text(result.snippet)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+
+            if isImporting {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "plus")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(isSelected ? .teal : .secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(result.title). \(result.snippet)")
+    }
+}
+
+private struct ImportedWikipediaCard: View {
+    let title: String
+    let wordCount: Int
+    let preview: String
+    let onChange: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Ready", systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.teal)
+
+                Spacer()
+
+                Text("\(wordCount.formatted()) words")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(title)
+                .font(.title2.weight(.semibold))
+                .lineLimit(2)
+
+            Text(cleanPreview)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineSpacing(3)
+                .lineLimit(6)
+
+            Button("Change article", action: onChange)
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(.teal)
+                .accessibilityLabel("Choose a different Wikipedia article")
+        }
+        .padding(14)
+        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Ready to save. \(title). \(wordCount.formatted()) words. \(cleanPreview)")
+    }
+
+    private var cleanPreview: String {
+        let cleaned = preview
+            .components(separatedBy: .newlines)
+            .filter { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty == false
+                    && trimmed.hasPrefix("Source:") == false
+                    && trimmed.hasPrefix("URL:") == false
+            }
+            .joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard cleaned.count > 520 else { return cleaned }
+        let prefix = String(cleaned.prefix(520)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(prefix)..."
+    }
+}
+
+private struct WikipediaSearchResult: Identifiable, Equatable {
+    let pageID: Int
+    let title: String
+    let snippet: String
+
+    var id: Int { pageID }
+}
+
+private struct WikipediaArticle {
+    let title: String
+    let extract: String
+    let url: String?
+
+    var noteText: String {
+        var parts = ["Source: Wikipedia"]
+        if let url, url.isEmpty == false {
+            parts.append("URL: \(url)")
+        }
+        parts.append("")
+        parts.append(extract)
+        return parts.joined(separator: "\n")
+    }
+}
+
+private enum WikipediaClient {
+    private static let host = "en.wikipedia.org"
+
+    static func search(query: String) async throws -> [WikipediaSearchResult] {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/w/api.php"
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "list", value: "search"),
+            URLQueryItem(name: "srsearch", value: query),
+            URLQueryItem(name: "srlimit", value: "8"),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "formatversion", value: "2")
+        ]
+
+        guard let url = components.url else { throw URLError(.badURL) }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let response = try JSONDecoder().decode(WikipediaSearchResponse.self, from: data)
+
+        return response.query.search.map { page in
+            WikipediaSearchResult(
+                pageID: page.pageid,
+                title: page.title,
+                snippet: cleanSnippet(page.snippet)
+            )
+        }
+    }
+
+    static func article(for result: WikipediaSearchResult) async throws -> WikipediaArticle {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/w/api.php"
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "query"),
+            URLQueryItem(name: "prop", value: "extracts|info"),
+            URLQueryItem(name: "pageids", value: "\(result.pageID)"),
+            URLQueryItem(name: "explaintext", value: "1"),
+            URLQueryItem(name: "exsectionformat", value: "plain"),
+            URLQueryItem(name: "inprop", value: "url"),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "formatversion", value: "2")
+        ]
+
+        guard let url = components.url else { throw URLError(.badURL) }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let response = try JSONDecoder().decode(WikipediaArticleResponse.self, from: data)
+        guard let page = response.query.pages.first else { throw URLError(.cannotParseResponse) }
+        let extract = page.extract.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard extract.isEmpty == false else { throw URLError(.zeroByteResource) }
+
+        return WikipediaArticle(title: page.title, extract: extract, url: page.fullurl)
+    }
+
+    private static func cleanSnippet(_ snippet: String) -> String {
+        snippet
+            .replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&#039;", with: "'")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct WikipediaSearchResponse: Decodable {
+    let query: Query
+
+    struct Query: Decodable {
+        let search: [Page]
+    }
+
+    struct Page: Decodable {
+        let pageid: Int
+        let title: String
+        let snippet: String
+    }
+}
+
+private struct WikipediaArticleResponse: Decodable {
+    let query: Query
+
+    struct Query: Decodable {
+        let pages: [Page]
+    }
+
+    struct Page: Decodable {
+        let title: String
+        let extract: String
+        let fullurl: String?
+    }
+}
+
+private extension QuizHistoryEntry {
+    var notesPercentText: String {
+        "\(Int((score * 100).rounded()))%"
     }
 }

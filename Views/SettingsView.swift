@@ -301,7 +301,7 @@ private struct ModelRuntimeSheet: View {
     private var runtimeHelpText: String {
         switch mode {
         case .localServer:
-            "Use your Mac as the Gemma server. Your phone must be on the same Wi-Fi."
+            "Use Gemma through your Mac. If it is unavailable, Accordian will use Apple Intelligence when this device supports it."
         case .onDevice:
             "Use Apple Intelligence when the device supports it. This does not require your Mac."
         }

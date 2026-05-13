@@ -21,6 +21,45 @@ struct TutorTurn: Identifiable, Equatable {
     }
 }
 
+struct QuizBuildProgress: Equatable {
+    enum Stage: Equatable {
+        case queued
+        case reading
+        case extracting
+        case saving
+        case expanding
+
+        var title: String {
+            switch self {
+            case .queued:
+                "Queued"
+            case .reading:
+                "Reading note"
+            case .extracting:
+                "Creating questions"
+            case .saving:
+                "Saving questions"
+            case .expanding:
+                "Building next quiz"
+            }
+        }
+    }
+
+    let sourceID: UUID
+    let stage: Stage
+    let progress: Double
+    let detail: String
+    let createdAt: Date = .now
+
+    var clampedProgress: Double {
+        min(max(progress, 0.02), 0.98)
+    }
+
+    var percentText: String {
+        "\(Int((clampedProgress * 100).rounded()))%"
+    }
+}
+
 struct LearningTopic: Identifiable, Equatable {
     let id: UUID
     let sourceID: UUID?
@@ -233,6 +272,8 @@ struct LearningQuestion: Identifiable, Equatable {
     let type: QuestionType
     let prompt: String
     let answer: String
+    let acceptedAnswers: [String]
+    let gradingRubric: String
     let choices: [String]
     let importance: Double
     let difficulty: Double
@@ -248,6 +289,8 @@ struct LearningQuestion: Identifiable, Equatable {
         type: QuestionType,
         prompt: String,
         answer: String,
+        acceptedAnswers: [String] = [],
+        gradingRubric: String = "",
         choices: [String] = [],
         importance: Double = 1,
         difficulty: Double = 1,
@@ -262,6 +305,8 @@ struct LearningQuestion: Identifiable, Equatable {
         self.type = type
         self.prompt = prompt
         self.answer = answer
+        self.acceptedAnswers = acceptedAnswers
+        self.gradingRubric = gradingRubric
         self.choices = choices
         self.importance = importance
         self.difficulty = difficulty
@@ -334,14 +379,53 @@ struct QuestionAttempt: Identifiable, Equatable {
     let questionID: UUID
     let response: String
     let score: Double
+    let feedback: String?
+    let matchedIdeas: [String]
+    let missingIdeas: [String]
     let createdAt: Date
 
-    init(id: UUID = UUID(), questionID: UUID, response: String, score: Double, createdAt: Date = .now) {
+    init(
+        id: UUID = UUID(),
+        questionID: UUID,
+        response: String,
+        score: Double,
+        feedback: String? = nil,
+        matchedIdeas: [String] = [],
+        missingIdeas: [String] = [],
+        createdAt: Date = .now
+    ) {
         self.id = id
         self.questionID = questionID
         self.response = response
         self.score = score
+        self.feedback = feedback
+        self.matchedIdeas = matchedIdeas
+        self.missingIdeas = missingIdeas
         self.createdAt = createdAt
+    }
+}
+
+struct QuizAnswerSubmission: Equatable {
+    let question: LearningQuestion
+    let response: String
+    let selectionReason: String
+
+    init(question: LearningQuestion, response: String, selectionReason: String = "") {
+        self.question = question
+        self.response = response
+        self.selectionReason = selectionReason
+    }
+}
+
+struct QuizQuestionSelection: Identifiable, Equatable {
+    let id: UUID
+    let question: LearningQuestion
+    let reason: String
+
+    init(question: LearningQuestion, reason: String) {
+        self.id = question.id
+        self.question = question
+        self.reason = reason
     }
 }
 
@@ -394,6 +478,7 @@ struct QuizHistoryEntry: Identifiable, Equatable {
     let gotCount: Int
     let closeCount: Int
     let reviewCount: Int
+    let attemptIDs: [UUID]
     let createdAt: Date
 
     init(
@@ -405,6 +490,7 @@ struct QuizHistoryEntry: Identifiable, Equatable {
         gotCount: Int,
         closeCount: Int,
         reviewCount: Int,
+        attemptIDs: [UUID] = [],
         createdAt: Date = .now
     ) {
         self.id = id
@@ -415,6 +501,7 @@ struct QuizHistoryEntry: Identifiable, Equatable {
         self.gotCount = gotCount
         self.closeCount = closeCount
         self.reviewCount = reviewCount
+        self.attemptIDs = attemptIDs
         self.createdAt = createdAt
     }
 }
@@ -496,6 +583,17 @@ struct LearningExtraction: Codable, Equatable {
 struct AnswerEvaluation: Codable, Equatable {
     let score: Double
     let reason: String?
+    let matchedIdeas: [String]?
+    let missingIdeas: [String]?
+    let feedback: String?
+
+    enum CodingKeys: String, CodingKey {
+        case score
+        case reason
+        case matchedIdeas = "matched_ideas"
+        case missingIdeas = "missing_ideas"
+        case feedback
+    }
 }
 
 struct ExtractedTopic: Codable, Equatable {
@@ -521,10 +619,24 @@ struct ExtractedSegment: Codable, Equatable {
 
 struct ExtractedQuestion: Codable, Equatable {
     let type: String
+    let assessmentAngle: String?
     let prompt: String
     let answer: String
+    let acceptedAnswers: [String]?
+    let gradingRubric: String?
     let choices: [String]?
     let difficulty: Double
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case assessmentAngle = "assessment_angle"
+        case prompt
+        case answer
+        case acceptedAnswers = "accepted_answers"
+        case gradingRubric = "grading_rubric"
+        case choices
+        case difficulty
+    }
 }
 
 struct StudySource: Identifiable, Equatable {
@@ -535,6 +647,7 @@ struct StudySource: Identifiable, Equatable {
         case audio
         case video
         case link
+        case wikipedia
 
         var title: String {
             switch self {
@@ -548,6 +661,8 @@ struct StudySource: Identifiable, Equatable {
                 "Video"
             case .link:
                 "Link"
+            case .wikipedia:
+                "Wikipedia"
             }
         }
 
@@ -563,6 +678,8 @@ struct StudySource: Identifiable, Equatable {
                 "play.rectangle"
             case .link:
                 "link"
+            case .wikipedia:
+                "globe"
             }
         }
     }
@@ -584,11 +701,45 @@ struct StudySource: Identifiable, Equatable {
         }
     }
 
+    enum QuizBuildState: String {
+        case idle
+        case building
+        case partial
+        case ready
+        case failed
+
+        var title: String {
+            switch self {
+            case .idle:
+                "Not Started"
+            case .building:
+                "Building"
+            case .partial:
+                "Quiz Available"
+            case .ready:
+                "Ready"
+            case .failed:
+                "Needs Model"
+            }
+        }
+
+        var allowsQuiz: Bool {
+            self == .partial || self == .ready
+        }
+    }
+
     let id: UUID
     let title: String
     let type: SourceType
     let status: ProcessingStatus
     let text: String
+    let summary: String
+    let quizBuildState: QuizBuildState
+    let quizBuildDetail: String
+    let quizBuildError: String
+    let quizBuildTargetCount: Int
+    let quizBuildSavedCount: Int
+    let quizBuildUpdatedAt: Date?
     let createdAt: Date
 
     init(
@@ -597,6 +748,13 @@ struct StudySource: Identifiable, Equatable {
         type: SourceType = .notes,
         status: ProcessingStatus = .ready,
         text: String,
+        summary: String = "",
+        quizBuildState: QuizBuildState = .idle,
+        quizBuildDetail: String = "",
+        quizBuildError: String = "",
+        quizBuildTargetCount: Int = 0,
+        quizBuildSavedCount: Int = 0,
+        quizBuildUpdatedAt: Date? = nil,
         createdAt: Date = .now
     ) {
         self.id = id
@@ -604,6 +762,13 @@ struct StudySource: Identifiable, Equatable {
         self.type = type
         self.status = status
         self.text = text
+        self.summary = summary
+        self.quizBuildState = quizBuildState
+        self.quizBuildDetail = quizBuildDetail
+        self.quizBuildError = quizBuildError
+        self.quizBuildTargetCount = quizBuildTargetCount
+        self.quizBuildSavedCount = quizBuildSavedCount
+        self.quizBuildUpdatedAt = quizBuildUpdatedAt
         self.createdAt = createdAt
     }
 }
