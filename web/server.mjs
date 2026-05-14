@@ -8,13 +8,15 @@ import crypto from "node:crypto";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, "public");
 const dataDir = join(__dirname, "data");
-const dbPath = join(dataDir, "accordian.sqlite");
+const dbPath = process.env.ACCORDIAN_DB_PATH || join(dataDir, "accordian.sqlite");
 const port = Number(process.env.PORT || 4173);
+const host = process.env.HOST || "127.0.0.1";
 const gemmaBaseURL = process.env.GEMMA_BASE_URL || "http://127.0.0.1:11434";
 const gemmaModel = process.env.GEMMA_MODEL || "gemma4:e2b";
 const expansionInFlight = new Set();
 
 mkdirSync(dataDir, { recursive: true });
+mkdirSync(dirname(dbPath), { recursive: true });
 
 function sqlEscape(value) {
   return String(value ?? "").replaceAll("'", "''");
@@ -62,10 +64,23 @@ function initDB() {
       last_tested_at REAL,
       created_at REAL NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS learning_segments (
+      id TEXT PRIMARY KEY NOT NULL,
+      note_id TEXT NOT NULL,
+      topic_id TEXT,
+      topic_title TEXT NOT NULL,
+      subtopic_title TEXT NOT NULL,
+      text TEXT NOT NULL,
+      evidence TEXT NOT NULL DEFAULT '',
+      importance REAL NOT NULL DEFAULT 1,
+      difficulty REAL NOT NULL DEFAULT 1,
+      created_at REAL NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS questions (
       id TEXT PRIMARY KEY NOT NULL,
       note_id TEXT NOT NULL,
       topic_id TEXT,
+      segment_id TEXT,
       concept_id TEXT,
       topic TEXT NOT NULL,
       subtopic TEXT NOT NULL,
@@ -116,6 +131,19 @@ function initDB() {
       attempt_ids TEXT NOT NULL,
       created_at REAL NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS journey_assignments (
+      id TEXT PRIMARY KEY NOT NULL,
+      note_id TEXT NOT NULL,
+      segment_id TEXT,
+      question_id TEXT,
+      type TEXT NOT NULL DEFAULT 'quiz',
+      reason TEXT NOT NULL DEFAULT '',
+      priority REAL NOT NULL DEFAULT 1,
+      due_at REAL NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at REAL NOT NULL,
+      completed_at REAL
+    );
     CREATE TABLE IF NOT EXISTS concept_memory (
       note_id TEXT NOT NULL,
       concept_signature TEXT NOT NULL,
@@ -142,6 +170,33 @@ function initDB() {
       mastery_state TEXT NOT NULL DEFAULT 'new',
       updated_at REAL NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS quiz_memory (
+      id TEXT PRIMARY KEY NOT NULL,
+      quiz_id TEXT,
+      note_id TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      selected_focus TEXT,
+      reason TEXT NOT NULL DEFAULT '',
+      target_concepts TEXT NOT NULL DEFAULT '[]',
+      avoided_concepts TEXT NOT NULL DEFAULT '[]',
+      question_mix TEXT NOT NULL DEFAULT '{}',
+      model_name TEXT NOT NULL DEFAULT '',
+      prompt_version TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS answer_evaluations (
+      id TEXT PRIMARY KEY NOT NULL,
+      attempt_id TEXT NOT NULL,
+      question_id TEXT NOT NULL,
+      note_id TEXT NOT NULL,
+      score REAL NOT NULL,
+      verdict TEXT NOT NULL DEFAULT '',
+      matched_ideas TEXT NOT NULL DEFAULT '[]',
+      missing_ideas TEXT NOT NULL DEFAULT '[]',
+      model_name TEXT NOT NULL DEFAULT '',
+      prompt_version TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS model_runs (
       id TEXT PRIMARY KEY NOT NULL,
       note_id TEXT,
@@ -149,6 +204,15 @@ function initDB() {
       prompt_version TEXT NOT NULL,
       status TEXT NOT NULL,
       detail TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS user_actions (
+      id TEXT PRIMARY KEY NOT NULL,
+      note_id TEXT,
+      action_type TEXT NOT NULL,
+      object_type TEXT NOT NULL DEFAULT '',
+      object_id TEXT NOT NULL DEFAULT '',
+      payload TEXT NOT NULL DEFAULT '{}',
       created_at REAL NOT NULL
     );
   `);
@@ -166,6 +230,7 @@ function initDB() {
   ]);
   ensureColumns("questions", [
     ["topic_id", "TEXT"],
+    ["segment_id", "TEXT"],
     ["concept_id", "TEXT"],
     ["assessment_angle", "TEXT NOT NULL DEFAULT 'recall'"],
     ["concept_signature", "TEXT NOT NULL DEFAULT ''"],
@@ -173,6 +238,12 @@ function initDB() {
     ["understanding_score", "REAL NOT NULL DEFAULT 0"],
     ["mastery_state", "TEXT NOT NULL DEFAULT 'new'"],
     ["last_seen_at", "REAL"]
+  ]);
+  ensureColumns("user_actions", [
+    ["note_id", "TEXT"],
+    ["object_type", "TEXT NOT NULL DEFAULT ''"],
+    ["object_id", "TEXT NOT NULL DEFAULT ''"],
+    ["payload", "TEXT NOT NULL DEFAULT '{}'"]
   ]);
 }
 
@@ -318,7 +389,30 @@ function createNote(title, text) {
     INSERT INTO notes (id, title, body, status, created_at)
     VALUES ('${id}', '${sqlEscape(title)}', '${sqlEscape(text)}', 'new', ${Date.now() / 1000});
   `);
+  recordUserAction({
+    noteId: id,
+    actionType: "note.created",
+    objectType: "note",
+    objectId: id,
+    payload: { title, wordCount: text.trim().split(/\s+/).filter(Boolean).length }
+  });
   return noteSummary(id);
+}
+
+function recordUserAction({ noteId = null, actionType, objectType = "", objectId = "", payload = {} }) {
+  sqlite(`
+    INSERT INTO user_actions (
+      id, note_id, action_type, object_type, object_id, payload, created_at
+    ) VALUES (
+      '${crypto.randomUUID()}',
+      ${noteId ? `'${sqlEscape(noteId)}'` : "NULL"},
+      '${sqlEscape(actionType)}',
+      '${sqlEscape(objectType)}',
+      '${sqlEscape(objectId)}',
+      '${sqlEscape(JSON.stringify(payload || {}))}',
+      ${Date.now() / 1000}
+    );
+  `);
 }
 
 function normalizeText(value) {
@@ -329,16 +423,51 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+function compactConceptText(value) {
+  return normalizeText(value)
+    .replace(/\b(what|which|how|why|does|do|is|are|the|a|an|in|of|for|to|from|with|and|or|its|their|this|that|kind|type|role|function|relationship|mechanism|principle|application|context|defined|contribute|allow|allows|class|classes)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function conceptFamilyFromText(...values) {
+  const text = normalizeText(values.join(" "));
+  if (text.includes("inheritance") && text.includes("interface")) return "inheritance-interfaces";
+  if (text.includes("object") && text.includes("class")) return "object-class";
+  if (text.includes("inheritance") || text.includes("reuse behavior")) return "inheritance";
+  if (text.includes("interface") || text.includes("capabilities") || text.includes("implement")) return "interfaces";
+  if (text.includes("bytecode") || text.includes("jvm") || text.includes("platform")) return "jvm-bytecode";
+  if (text.includes("class based") || text.includes("programming language")) return "java-language-type";
+  if (text.includes("encapsulation") || (text.includes("data") && text.includes("behavior"))) return "encapsulation";
+  return "";
+}
+
+function canonicalConceptKey(question) {
+  const prompt = question.canonical_prompt || question.prompt || question.variant_prompt || "";
+  const concept = question.concept || question.subtopic || question.subtopic_title || "";
+  const excerpt = question.source_excerpt || question.sourceExcerpt || "";
+  const answer = question.canonical_answer || question.answer || question.variant_answer || "";
+  const family = conceptFamilyFromText(concept, prompt, answer, excerpt);
+  const conceptStem = compactConceptText(concept || prompt).split(" ").slice(0, 7).join(" ");
+  const answerStem = compactConceptText(answer).split(" ").slice(0, 8).join(" ");
+  return [family || conceptStem || answerStem, answerStem].filter(Boolean).join(":").slice(0, 180);
+}
+
 function conceptSignature(question) {
-  const topic = normalizeText(question.topic || question.topic_title || "");
-  const subtopic = normalizeText(question.subtopic || question.subtopic_title || "");
-  const angle = normalizeText(question.assessment_angle || question.assessmentAngle || "recall");
-  const answer = normalizeText(question.answer || "").split(" ").slice(0, 8).join(" ");
-  return [topic, subtopic, angle, answer].filter(Boolean).join(":").slice(0, 220) || crypto.randomUUID();
+  return canonicalConceptKey(question) || crypto.randomUUID();
 }
 
 function promptFingerprint(prompt) {
   return normalizeText(prompt).slice(0, 260);
+}
+
+function quizLegitimacyKey(row) {
+  const answer = normalizeText(row.variant_answer || row.answer || "").split(" ").slice(0, 7).join(" ");
+  const angle = normalizeText(row.assessment_angle || "recall");
+  return [canonicalConceptKey(row), angle, answer]
+    .filter(Boolean)
+    .join(":")
+    .slice(0, 180);
 }
 
 function shuffled(values) {
@@ -360,27 +489,7 @@ function recordModelRun({ noteId, task, promptVersion, status, detail = "" }) {
   `);
 }
 
-async function gemmaJSON(prompt) {
-  const response = await fetch(`${gemmaBaseURL}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: gemmaModel,
-      stream: false,
-      messages: [
-        {
-          role: "user",
-          content: prompt
-        }
-      ]
-    })
-  });
-  if (!response.ok) {
-    throw new Error(`Gemma request failed: ${response.status}`);
-  }
-
-  const payload = await response.json();
-  const content = payload.message?.content || "";
+function parseJSONFromModelText(content) {
   const cleaned = content
     .replace(/```json/gi, "```")
     .replace(/```/g, "")
@@ -393,39 +502,86 @@ async function gemmaJSON(prompt) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
+async function gemmaText(prompt, timeoutMs = 120000, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetch(`${gemmaBaseURL}/api/chat`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: gemmaModel,
+      stream: false,
+      ...(options.format ? { format: options.format } : {}),
+      messages: [
+        {
+          role: "user",
+          content: prompt
+        }
+      ]
+    })
+  });
+  clearTimeout(timeout);
+  if (!response.ok) {
+    throw new Error(`Gemma request failed: ${response.status}`);
+  }
+
+  const payload = await response.json();
+  return payload.message?.content || "";
+}
+
+async function gemmaJSON(prompt) {
+  const content = await gemmaText(prompt, 120000, { format: "json" });
+  try {
+    return parseJSONFromModelText(content);
+  } catch (error) {
+    const repaired = await gemmaText(`
+Repair this into valid JSON only.
+Do not add commentary.
+Preserve all fields and arrays that are already present.
+If an item is malformed, fix commas/brackets/quotes rather than deleting the whole item.
+
+BROKEN_JSON_TEXT:
+${content}
+`, 60000, { format: "json" });
+    try {
+      return parseJSONFromModelText(repaired);
+    } catch {
+      throw error;
+    }
+  }
+}
+
 function questionTargetFor(text) {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  if (words < 120) return 12;
-  if (words < 400) return 18;
-  if (words < 900) return 28;
-  if (words < 1800) return 40;
-  return 56;
+  if (words < 120) return 8;
+  if (words < 400) return 12;
+  if (words < 900) return 18;
+  if (words < 1800) return 24;
+  return 32;
 }
 
 function quizPromptFor(note, target) {
+  const safeTarget = Math.min(6, Math.max(5, target));
   return `
 You are building durable learning objects for an education app.
 Use ONLY the note text. Do not use outside facts.
-Create ${target} useful question objects proportional to the note's important concepts.
+Create exactly ${safeTarget} useful question objects proportional to the note's important concepts.
 Avoid duplicate prompts. Avoid trivia unless it anchors an important idea.
 Cover definitions, causes, locations, sequences, comparisons, consequences, and applied understanding where the note supports it.
-Each question object must include multiple delivery variants where possible.
+Prefer one durable question per distinct concept. Do not create multiple questions whose correct answer is the same fact.
+Each question object must include one multiple_choice variant.
 Every multiple_choice variant must have exactly 4 choices and one exact answer that appears in choices.
+Return valid JSON only. No markdown. No commentary.
 
 Return only JSON:
 {
   "summary": "2 sentence student-friendly summary",
-  "topics": [
-    {
-      "title": "broad topic",
-      "summary": "what this topic covers",
-      "importance": 0.9
-    }
-  ],
   "questions": [
     {
       "topic": "broad topic",
       "concept": "specific concept",
+      "segment": "specific subtopic or segment title",
       "source_excerpt": "exact note-backed text this question tests",
       "assessment_angle": "definition | cause | sequence | comparison | consequence | application | detail",
       "canonical_prompt": "stable question object",
@@ -440,13 +596,6 @@ Return only JSON:
           "answer": "correct choice",
           "choices": ["correct choice", "distractor", "distractor", "distractor"],
           "rubric": "what must be known"
-        },
-        {
-          "delivery_type": "short_answer",
-          "prompt": "short answer prompt",
-          "answer": "expected answer",
-          "choices": [],
-          "rubric": "main ideas required"
         }
       ]
     }
@@ -457,7 +606,7 @@ NOTE TITLE:
 ${note.title}
 
 NOTE TEXT:
-${note.body.slice(0, 12000)}
+${note.body.slice(0, 4000)}
 `;
 }
 
@@ -469,6 +618,240 @@ function existingPromptFingerprints(noteId) {
       SELECT prompt AS canonical_prompt FROM question_variants WHERE note_id = '${sqlEscape(noteId)}'
     )
   `, { json: true }).map((row) => promptFingerprint(row.prompt)));
+}
+
+function existingConceptSignatures(noteId) {
+  return new Set(sqlite(`
+    SELECT concept_signature
+    FROM questions
+    WHERE note_id = '${sqlEscape(noteId)}'
+      AND concept_signature != ''
+  `, { json: true }).map((row) => row.concept_signature));
+}
+
+function existingCanonicalConceptKeys(noteId) {
+  return new Set(sqlite(`
+    SELECT topic, subtopic, prompt, answer, assessment_angle, concept_signature
+    FROM questions
+    WHERE note_id = '${sqlEscape(noteId)}'
+  `, { json: true }).map((row) => canonicalConceptKey({
+    topic: row.topic,
+    subtopic: row.subtopic,
+    prompt: row.prompt,
+    answer: row.answer,
+    assessment_angle: row.assessment_angle,
+    concept_signature: row.concept_signature
+  })).filter(Boolean));
+}
+
+function existingAnswerConceptPairs(noteId) {
+  return new Set(sqlite(`
+    SELECT topic, subtopic, prompt, answer
+    FROM questions
+    WHERE note_id = '${sqlEscape(noteId)}'
+  `, { json: true }).map((row) => {
+    const conceptKey = canonicalConceptKey(row).split(":")[0] || "";
+    const answerKey = compactConceptText(row.answer).split(" ").slice(0, 8).join(" ");
+    return `${conceptKey}:${answerKey}`;
+  }).filter((key) => key !== ":"));
+}
+
+function learningContextForNote(noteId) {
+  const note = noteSummary(noteId);
+  const conceptMemory = sqlite(`
+    SELECT
+      concept_signature,
+      topic,
+      subtopic,
+      attempts,
+      average_score,
+      latest_score,
+      last_seen
+    FROM concept_memory
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY average_score ASC, last_seen DESC
+    LIMIT 40
+  `, { json: true });
+  const segments = sqlite(`
+    SELECT id, topic_title, subtopic_title, text, evidence, importance, difficulty, created_at
+    FROM learning_segments
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY importance DESC, created_at ASC
+    LIMIT 80
+  `, { json: true });
+  const assignments = sqlite(`
+    SELECT id, segment_id, question_id, type, reason, priority, due_at, status, created_at, completed_at
+    FROM journey_assignments
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY status ASC, priority DESC, due_at ASC
+    LIMIT 80
+  `, { json: true });
+  const questionMemory = sqlite(`
+    SELECT
+      q.id,
+      q.topic,
+      q.subtopic,
+      q.prompt,
+      q.answer,
+      q.assessment_angle,
+      q.concept_signature,
+      q.understanding_score,
+      q.mastery_state,
+      q.last_seen_at,
+      COALESCE(lm.average_score, 0) AS average_score,
+      COALESCE(lm.latest_score, 0) AS latest_score,
+      COALESCE(lm.attempt_count, 0) AS attempt_count,
+      COALESCE(lm.weakness_reason, '') AS weakness_reason
+    FROM questions q
+    LEFT JOIN learning_memory lm ON lm.question_id = q.id
+    WHERE q.note_id = '${sqlEscape(noteId)}'
+    ORDER BY q.last_seen_at DESC NULLS LAST, q.created_at DESC
+    LIMIT 80
+  `, { json: true }).map((row) => ({
+    ...row,
+    canonicalConceptKey: canonicalConceptKey(row)
+  }));
+  const recentAttempts = sqlite(`
+    SELECT
+      a.question_id,
+      a.variant_id,
+      a.topic_snapshot AS topic,
+      a.subtopic_snapshot AS subtopic,
+      a.prompt_snapshot AS prompt,
+      a.answer_snapshot AS answer,
+      a.response,
+      a.score,
+      a.feedback,
+      a.created_at
+    FROM attempts a
+    WHERE a.note_id = '${sqlEscape(noteId)}'
+    ORDER BY a.created_at DESC
+    LIMIT 40
+  `, { json: true }).map((row) => ({
+    ...row,
+    canonicalConceptKey: canonicalConceptKey(row)
+  }));
+  const quizHistory = sqlite(`
+    SELECT id, score, attempt_ids, created_at
+    FROM quiz_sessions
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY created_at DESC
+    LIMIT 10
+  `, { json: true });
+  const quizMemory = sqlite(`
+    SELECT title, selected_focus, reason, target_concepts, avoided_concepts, question_mix, model_name, prompt_version, created_at
+    FROM quiz_memory
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY created_at DESC
+    LIMIT 20
+  `, { json: true }).map((row) => ({
+    ...row,
+    target_concepts: (() => {
+      try { return JSON.parse(row.target_concepts || "[]"); } catch { return []; }
+    })(),
+    avoided_concepts: (() => {
+      try { return JSON.parse(row.avoided_concepts || "[]"); } catch { return []; }
+    })(),
+    question_mix: (() => {
+      try { return JSON.parse(row.question_mix || "{}"); } catch { return {}; }
+    })()
+  }));
+  const answerEvaluations = sqlite(`
+    SELECT question_id, score, verdict, matched_ideas, missing_ideas, model_name, prompt_version, created_at
+    FROM answer_evaluations
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY created_at DESC
+    LIMIT 40
+  `, { json: true }).map((row) => ({
+    ...row,
+    matched_ideas: (() => {
+      try { return JSON.parse(row.matched_ideas || "[]"); } catch { return []; }
+    })(),
+    missing_ideas: (() => {
+      try { return JSON.parse(row.missing_ideas || "[]"); } catch { return []; }
+    })()
+  }));
+  const actions = sqlite(`
+    SELECT action_type, object_type, object_id, payload, created_at
+    FROM user_actions
+    WHERE note_id = '${sqlEscape(noteId)}' OR note_id IS NULL
+    ORDER BY created_at DESC
+    LIMIT 60
+  `, { json: true }).map((row) => ({
+    ...row,
+    payload: (() => {
+      try {
+        return JSON.parse(row.payload || "{}");
+      } catch {
+        return {};
+      }
+    })()
+  }));
+  const latestQuiz = quizHistory[0] || null;
+  const latestAttemptIds = latestQuiz
+    ? String(latestQuiz.attempt_ids || "").split(/\n+/).map((id) => id.trim()).filter(Boolean)
+    : [];
+  const latestAssigned = latestAttemptIds.length
+    ? sqlite(`
+      SELECT
+        a.question_id,
+        a.topic_snapshot AS topic,
+        a.subtopic_snapshot AS subtopic,
+        a.prompt_snapshot AS prompt,
+        a.answer_snapshot AS answer,
+        a.response,
+        a.score
+      FROM attempts a
+      WHERE a.id IN (${latestAttemptIds.map((id) => `'${sqlEscape(id)}'`).join(",")})
+    `, { json: true }).map((row) => ({
+      ...row,
+      canonicalConceptKey: canonicalConceptKey(row)
+    }))
+    : [];
+  const masteredConcepts = questionMemory
+    .filter((row) => Number(row.understanding_score || 0) >= 0.9 || row.mastery_state === "strong" || row.mastery_state === "mastered")
+    .map((row) => row.canonicalConceptKey);
+  const weakConcepts = questionMemory
+    .filter((row) => Number(row.average_score || 0) < 0.8 && Number(row.attempt_count || 0) > 0)
+    .map((row) => ({
+      key: row.canonicalConceptKey,
+      prompt: row.prompt,
+      answer: row.answer,
+      averageScore: Number(row.average_score || 0),
+      latestScore: Number(row.latest_score || 0),
+      attempts: Number(row.attempt_count || 0)
+    }));
+  return {
+    note: note ? {
+      id: note.id,
+      title: note.title,
+      summary: note.summary,
+      questionCount: note.questionCount,
+      attemptCount: note.attemptCount,
+      averageScore: note.averageScore
+    } : null,
+    latestQuiz: latestQuiz ? {
+      id: latestQuiz.id,
+      score: Number(latestQuiz.score || 0),
+      createdAt: Number(latestQuiz.created_at || 0)
+    } : null,
+    latestAssigned,
+    masteredConcepts: [...new Set(masteredConcepts)],
+    weakConcepts,
+    segments,
+    assignments,
+    conceptMemory,
+    questionMemory,
+    recentAttempts,
+    quizMemory,
+    answerEvaluations,
+    quizHistory: quizHistory.map((row) => ({
+      id: row.id,
+      score: Number(row.score || 0),
+      createdAt: Number(row.created_at || 0)
+    })),
+    recentActions: actions
+  };
 }
 
 function topicIdFor(noteId, title, summary = "", importance = 1) {
@@ -525,13 +908,93 @@ function conceptIdFor(noteId, topicId, question) {
   return id;
 }
 
+function segmentIdFor(noteId, topicId, question) {
+  const topicTitle = String(question.topic || question.topic_title || "Main Topic").trim();
+  const subtopicTitle = String(question.segment || question.concept || question.subtopic || question.subtopic_title || "Core Segment").trim();
+  const existing = sqlite(`
+    SELECT id FROM learning_segments
+    WHERE note_id = '${sqlEscape(noteId)}'
+      AND lower(topic_title) = lower('${sqlEscape(topicTitle)}')
+      AND lower(subtopic_title) = lower('${sqlEscape(subtopicTitle)}')
+    LIMIT 1
+  `, { json: true })[0];
+  if (existing?.id) return existing.id;
+  const id = crypto.randomUUID();
+  sqlite(`
+    INSERT INTO learning_segments (
+      id, note_id, topic_id, topic_title, subtopic_title, text, evidence,
+      importance, difficulty, created_at
+    ) VALUES (
+      '${id}',
+      '${sqlEscape(noteId)}',
+      '${sqlEscape(topicId)}',
+      '${sqlEscape(topicTitle)}',
+      '${sqlEscape(subtopicTitle)}',
+      '${sqlEscape(question.source_excerpt || question.sourceExcerpt || question.text || question.canonical_prompt || question.prompt || "")}',
+      '${sqlEscape(question.source_excerpt || question.sourceExcerpt || question.evidence || "")}',
+      ${Number(question.importance || 1)},
+      ${Number(question.difficulty || 1)},
+      ${Date.now() / 1000}
+    );
+  `);
+  return id;
+}
+
+function normalizeChoice(value) {
+  return normalizeText(value).replace(/\s+/g, " ").trim();
+}
+
+function validatedMultipleChoiceVariant(variant, fallbackPrompt, fallbackAnswer) {
+  const prompt = String(variant.prompt || fallbackPrompt || "").trim();
+  const rawAnswer = String(variant.answer || fallbackAnswer || "").trim();
+  const rawChoices = Array.isArray(variant.choices)
+    ? variant.choices.map((choice) => String(choice || "").trim()).filter(Boolean)
+    : [];
+  if (!prompt || !rawAnswer) return { valid: false, reason: "missing_prompt_or_answer" };
+  if (rawChoices.length !== 4) return { valid: false, reason: "choice_count" };
+
+  const normalizedChoices = rawChoices.map(normalizeChoice);
+  if (new Set(normalizedChoices).size !== 4) return { valid: false, reason: "duplicate_choices" };
+
+  const answerNorm = normalizeChoice(rawAnswer);
+  const answerIndex = normalizedChoices.findIndex((choice) => choice === answerNorm);
+  if (answerIndex === -1) return { valid: false, reason: "answer_not_in_choices" };
+
+  const answer = rawChoices[answerIndex];
+  const distractors = rawChoices.filter((_, index) => index !== answerIndex);
+  const brokenDistractor = distractors.some((choice) => {
+    const choiceNorm = normalizeChoice(choice);
+    if (!choiceNorm || choiceNorm.length < 2) return true;
+    if (choiceNorm === answerNorm) return true;
+    if (answerNorm.length >= 8 && choiceNorm.includes(answerNorm)) return true;
+    if (choiceNorm.length >= 8 && answerNorm.includes(choiceNorm)) return true;
+    return false;
+  });
+  if (brokenDistractor) return { valid: false, reason: "broken_distractor" };
+
+  return {
+    valid: true,
+    variant: {
+      ...variant,
+      delivery_type: "multiple_choice",
+      prompt,
+      answer,
+      choices: rawChoices
+    }
+  };
+}
+
 function insertVariant(noteId, questionId, variant) {
   const type = String(variant.delivery_type || variant.deliveryType || "multiple_choice").trim();
   const prompt = String(variant.prompt || "").trim();
   const answer = String(variant.answer || "").trim();
   if (!prompt || !answer) return false;
   const choices = Array.isArray(variant.choices) ? variant.choices.filter(Boolean).map(String) : [];
-  if (type === "multiple_choice" && (choices.length !== 4 || choices.includes(answer) === false)) return false;
+  if (type === "multiple_choice") {
+    const validation = validatedMultipleChoiceVariant(variant, prompt, answer);
+    if (!validation.valid) return false;
+    variant = validation.variant;
+  }
   sqlite(`
     INSERT INTO question_variants (
       id, question_id, note_id, delivery_type, prompt, answer, choices, rubric, created_at
@@ -552,6 +1015,10 @@ function insertVariant(noteId, questionId, variant) {
 
 function insertQuestions(noteId, questions, generationSource) {
   const existing = existingPromptFingerprints(noteId);
+  const existingConcepts = existingConceptSignatures(noteId);
+  const existingCanonicalKeys = existingCanonicalConceptKeys(noteId);
+  const existingAnswerPairs = existingAnswerConceptPairs(noteId);
+  const allowConceptReassessment = generationSource === "mastery_expansion";
   let saved = 0;
   for (const question of questions) {
     const variants = Array.isArray(question.variants) && question.variants.length > 0
@@ -566,36 +1033,57 @@ function insertQuestions(noteId, questions, generationSource) {
     const prompt = String(question.canonical_prompt || question.prompt || variants[0]?.prompt || "").trim();
     const answer = String(question.canonical_answer || question.answer || variants[0]?.answer || "").trim();
     const fingerprint = promptFingerprint(prompt);
-    if (!prompt || !answer || existing.has(fingerprint)) continue;
+    const normalizedQuestion = { ...question, prompt, answer };
+    const signature = conceptSignature(normalizedQuestion);
+    const canonicalKey = canonicalConceptKey(normalizedQuestion);
+    const conceptRoot = canonicalKey.split(":")[0] || "";
+    const answerRoot = compactConceptText(answer).split(" ").slice(0, 8).join(" ");
+    const answerPair = `${conceptRoot}:${answerRoot}`;
+    if (
+      !prompt ||
+      !answer ||
+      existing.has(fingerprint) ||
+      (!allowConceptReassessment && (
+        existingConcepts.has(signature) ||
+        existingCanonicalKeys.has(canonicalKey) ||
+        existingAnswerPairs.has(answerPair)
+      ))
+    ) continue;
     existing.add(fingerprint);
+    existingConcepts.add(signature);
+    existingCanonicalKeys.add(canonicalKey);
+    existingAnswerPairs.add(answerPair);
     const topicTitle = question.topic || question.topic_title || "Main Topic";
     const topicId = topicIdFor(noteId, topicTitle, "", question.importance || 1);
+    const segmentId = segmentIdFor(noteId, topicId, question);
     const conceptId = conceptIdFor(noteId, topicId, question);
     const questionId = crypto.randomUUID();
     const acceptedAnswers = Array.isArray(question.accepted_answers || question.acceptedAnswers)
       ? (question.accepted_answers || question.acceptedAnswers)
       : [answer];
     const mcVariant = variants.find((variant) => (variant.delivery_type || variant.deliveryType || "multiple_choice") === "multiple_choice") || variants[0] || {};
-    const choices = Array.isArray(mcVariant.choices) ? mcVariant.choices : [];
-    if (choices.length !== 4 || choices.includes(String(mcVariant.answer || answer)) === false) continue;
-    saved += 1;
+    const mcValidation = validatedMultipleChoiceVariant(mcVariant, prompt, answer);
+    if (!mcValidation.valid) continue;
+    const cleanMCVariant = mcValidation.variant;
+    const choices = cleanMCVariant.choices;
     sqlite(`
       INSERT INTO questions (
-        id, note_id, topic_id, concept_id, topic, subtopic, assessment_angle, concept_signature,
+        id, note_id, topic_id, segment_id, concept_id, topic, subtopic, assessment_angle, concept_signature,
         generation_source, prompt, answer, choices, importance, difficulty,
         understanding_score, mastery_state, created_at
       ) VALUES (
         '${questionId}',
         '${sqlEscape(noteId)}',
         '${sqlEscape(topicId)}',
+        '${sqlEscape(segmentId)}',
         '${sqlEscape(conceptId)}',
         '${sqlEscape(question.topic || "Main Topic")}',
         '${sqlEscape(question.concept || question.subtopic || "Core Idea")}',
         '${sqlEscape(question.assessment_angle || question.assessmentAngle || "recall")}',
-        '${sqlEscape(conceptSignature(question))}',
+        '${sqlEscape(signature)}',
         '${sqlEscape(generationSource)}',
         '${sqlEscape(prompt)}',
-        '${sqlEscape(answer)}',
+        '${sqlEscape(cleanMCVariant.answer)}',
         '${sqlEscape(JSON.stringify(shuffled(choices)))}',
         ${Number(question.importance || 1)},
         ${Number(question.difficulty || 1)},
@@ -605,23 +1093,16 @@ function insertQuestions(noteId, questions, generationSource) {
       );
     `);
     let variantSaved = false;
-    for (const variant of variants) {
+    for (const variant of [cleanMCVariant, ...variants.filter((candidate) => candidate !== mcVariant)]) {
       const normalizedVariant = {
         ...variant,
         prompt: variant.prompt || prompt,
-        answer: variant.answer || answer
+        answer: variant.answer || cleanMCVariant.answer
       };
       variantSaved = insertVariant(noteId, questionId, normalizedVariant) || variantSaved;
     }
-    if (!variantSaved) {
-      insertVariant(noteId, questionId, {
-        delivery_type: "multiple_choice",
-        prompt,
-        answer,
-        choices,
-        rubric: `Accepted answers: ${acceptedAnswers.join(", ")}`
-      });
-    }
+    if (!variantSaved) continue;
+    saved += 1;
   }
   return saved;
 }
@@ -630,8 +1111,17 @@ function saveQuestions(noteId, summary, questions) {
   sqlite(`DELETE FROM question_variants WHERE note_id = '${sqlEscape(noteId)}';`);
   sqlite(`DELETE FROM questions WHERE note_id = '${sqlEscape(noteId)}';`);
   sqlite(`DELETE FROM concepts WHERE note_id = '${sqlEscape(noteId)}';`);
+  sqlite(`DELETE FROM learning_segments WHERE note_id = '${sqlEscape(noteId)}';`);
+  sqlite(`DELETE FROM journey_assignments WHERE note_id = '${sqlEscape(noteId)}';`);
   sqlite(`DELETE FROM topics WHERE note_id = '${sqlEscape(noteId)}';`);
   const saved = insertQuestions(noteId, questions, "initial");
+  recordUserAction({
+    noteId,
+    actionType: "note.analyzed",
+    objectType: "note",
+    objectId: noteId,
+    payload: { savedQuestions: saved, summary: summary || "" }
+  });
   sqlite(`
     UPDATE notes
     SET summary = '${sqlEscape(summary || "")}',
@@ -642,13 +1132,15 @@ function saveQuestions(noteId, summary, questions) {
 }
 
 function startQuiz(noteId) {
+  const masteredQuizFingerprints = recentMasteredQuizFingerprints(noteId);
   const latestSession = sqlite(`
-    SELECT attempt_ids
+    SELECT attempt_ids, score
     FROM quiz_sessions
     WHERE note_id = '${sqlEscape(noteId)}'
     ORDER BY created_at DESC
     LIMIT 1
   `, { json: true })[0];
+  const latestSessionScore = Number(latestSession?.score ?? -1);
   const latestAttemptIds = String(latestSession?.attempt_ids || "")
     .split(/\n+/)
     .map((id) => id.trim())
@@ -683,27 +1175,79 @@ function startQuiz(noteId) {
   const pool = rows.length - latestQuestionIds.size >= 8
     ? rows.filter((row) => latestQuestionIds.has(row.id) === false)
     : rows;
+  const latestConceptKeys = new Set(rows
+    .filter((row) => latestQuestionIds.has(row.id))
+    .map((row) => canonicalConceptKey(row)));
+  const weakConceptKeys = new Set(rows
+    .filter((row) => Number(row.attempt_count || 0) > 0 && Number(row.average_score) < 0.8)
+    .map((row) => canonicalConceptKey(row)));
 
-  const sorted = pool.sort((left, right) => {
+  const ranked = pool.sort((left, right) => {
     const score = (row) => {
       const average = Number(row.average_score);
       const attempts = Number(row.attempt_count || 0);
       const lastSeen = Number(row.last_seen || 0);
       const age = lastSeen === 0 ? 30 : Math.min(30, ((Date.now() / 1000) - lastSeen) / 86400);
+      const conceptKey = canonicalConceptKey(row);
+      const justMasteredPenalty = latestSessionScore >= 0.95 && latestConceptKeys.has(conceptKey) && !weakConceptKeys.has(conceptKey)
+        ? -700
+        : 0;
       return (
         (attempts === 0 ? 1000 : 0) +
         (average >= 0 && average < 0.8 ? 500 : 0) +
         (latestQuestionIds.has(row.id) ? -250 : 0) +
+        justMasteredPenalty +
         Number(row.importance || 1) * 30 +
-        Number(row.difficulty || 1) * 20 +
+        Number(row.difficulty || 1) * (latestSessionScore >= 0.95 ? 45 : 20) +
         age +
         Math.random()
       );
     };
     return score(right) - score(left);
-  }).slice(0, 8);
+  });
 
-  return sorted.map((row) => ({
+  const selected = [];
+  const selectedKeys = new Set();
+  const selectedConceptRoots = new Set();
+  const selectedSubtopics = new Map();
+  const selectedAnswers = new Map();
+  for (const row of ranked) {
+    const key = quizLegitimacyKey(row);
+    const conceptRoot = canonicalConceptKey(row).split(":")[0] || key;
+    const answerKey = normalizeText(row.variant_answer || row.answer || "");
+    const subtopicKey = normalizeText(row.subtopic || row.topic || "topic");
+    const subtopicCount = selectedSubtopics.get(subtopicKey) || 0;
+    const answerCount = selectedAnswers.get(answerKey) || 0;
+    const isWeak = weakConceptKeys.has(canonicalConceptKey(row));
+    if (selectedKeys.has(key)) continue;
+    if (selectedConceptRoots.has(conceptRoot)) continue;
+    if (latestSessionScore >= 0.95 && latestConceptKeys.has(canonicalConceptKey(row)) && !isWeak && ranked.length - selected.length > 3) continue;
+    if (answerKey && answerCount >= 1 && ranked.length - selected.length > 3) continue;
+    if (subtopicCount >= 1 && ranked.length - selected.length > 3) continue;
+    selected.push(row);
+    selectedKeys.add(key);
+    selectedConceptRoots.add(conceptRoot);
+    selectedSubtopics.set(subtopicKey, subtopicCount + 1);
+    if (answerKey) selectedAnswers.set(answerKey, answerCount + 1);
+    if (selected.length >= 8) break;
+  }
+
+  const sorted = [...selected];
+  if (sorted.length < Math.min(5, ranked.length)) {
+    for (const row of ranked) {
+      if (sorted.some((candidate) => candidate.id === row.id)) continue;
+      const key = quizLegitimacyKey(row);
+      const conceptRoot = canonicalConceptKey(row).split(":")[0] || key;
+      const answerKey = normalizeText(row.variant_answer || row.answer || "");
+      const matchingKey = sorted.some((candidate) => quizLegitimacyKey(candidate) === key);
+      const matchingConcept = sorted.some((candidate) => (canonicalConceptKey(candidate).split(":")[0] || quizLegitimacyKey(candidate)) === conceptRoot);
+      const matchingAnswer = answerKey && sorted.some((candidate) => normalizeText(candidate.variant_answer || candidate.answer || "") === answerKey);
+      if (matchingKey || matchingConcept || matchingAnswer) continue;
+      sorted.push(row);
+      if (sorted.length >= 8) break;
+    }
+  }
+  const quiz = sorted.map((row) => ({
     id: row.id,
     variantId: row.variant_id || "",
     deliveryType: row.delivery_type || "multiple_choice",
@@ -714,6 +1258,73 @@ function startQuiz(noteId) {
     answer: row.variant_answer || row.answer,
     choices: JSON.parse(row.variant_choices || row.choices || "[]")
   }));
+
+  const quizFingerprint = quizConceptSetFingerprint(quiz);
+  if (quiz.length > 0 && masteredQuizFingerprints.has(quizFingerprint)) {
+    recordUserAction({
+      noteId,
+      actionType: "quiz.suppressed_mastered_repeat",
+      objectType: "quiz",
+      objectId: "",
+      payload: {
+        reason: "The selected concept set was already mastered at 100%.",
+        questionCount: quiz.length,
+        conceptFingerprint: quizFingerprint,
+        questions: quiz.map((question) => ({
+          id: question.id,
+          topic: question.topic,
+          subtopic: question.subtopic,
+          prompt: question.prompt,
+          canonicalConceptKey: canonicalConceptKey(question)
+        }))
+      }
+    });
+    saveQuizMemory({
+      noteId,
+      title: "Suppressed quiz",
+      reason: "Avoided serving a concept set that was already mastered at 100%.",
+      questions: quiz,
+      promptVersion: "quiz_suppressed_mastered_repeat.web.v1"
+    });
+    const nextQuiz = queueNextQuiz(noteId, quiz.map((question) => ({
+      ...question,
+      response: question.answer,
+      score: 1,
+      feedback: "Mastered concept set suppressed. Generate harder adjacent checks.",
+      canonicalConceptKey: canonicalConceptKey(question)
+    })), {
+      force: true,
+      reason: "mastered_repeat_suppressed"
+    });
+    return { questions: [], nextQuiz };
+  }
+
+  recordUserAction({
+    noteId,
+    actionType: "quiz.started",
+    objectType: "quiz",
+    objectId: "",
+    payload: {
+      questionCount: quiz.length,
+      questions: quiz.map((question) => ({
+        id: question.id,
+        variantId: question.variantId,
+        topic: question.topic,
+        subtopic: question.subtopic,
+        prompt: question.prompt,
+        answer: question.answer,
+        canonicalConceptKey: canonicalConceptKey(question)
+      }))
+    }
+  });
+  saveQuizMemory({
+    noteId,
+    title: "Started quiz",
+    reason: "Stored assigned concepts for the quiz Gemma and SQLite memory loop.",
+    questions: quiz,
+    promptVersion: "quiz_started.web.v1"
+  });
+  return { questions: quiz, nextQuiz: null };
 }
 
 function updateConceptMemory(noteId, question, score) {
@@ -832,7 +1443,87 @@ function updateLearningMemory(noteId, question, variant, score) {
   }
 }
 
-function quizExpansionPromptFor(note, details, target) {
+function saveAnswerEvaluation({ attemptId, question, noteId, score, verdict, matchedIdeas = [], missingIdeas = [] }) {
+  sqlite(`
+    INSERT INTO answer_evaluations (
+      id, attempt_id, question_id, note_id, score, verdict,
+      matched_ideas, missing_ideas, model_name, prompt_version, created_at
+    ) VALUES (
+      '${crypto.randomUUID()}',
+      '${sqlEscape(attemptId)}',
+      '${sqlEscape(question.id)}',
+      '${sqlEscape(noteId)}',
+      ${Number(score || 0)},
+      '${sqlEscape(verdict)}',
+      '${sqlEscape(JSON.stringify(matchedIdeas))}',
+      '${sqlEscape(JSON.stringify(missingIdeas))}',
+      '${sqlEscape(gemmaModel)}',
+      'local_multiple_choice.v1',
+      ${Date.now() / 1000}
+    );
+  `);
+}
+
+function saveQuizMemory({ noteId, quizId = "", title = "", reason = "", questions = [], details = [], promptVersion = "quiz_memory.web.v1" }) {
+  const targetConcepts = [...new Set(questions.map((question) => canonicalConceptKey(question)).filter(Boolean))];
+  const avoidedConcepts = [...new Set(details
+    .filter((detail) => Number(detail.score || 0) >= 0.9)
+    .map((detail) => detail.canonicalConceptKey || canonicalConceptKey(detail))
+    .filter(Boolean))];
+  const questionMix = questions.reduce((mix, question) => {
+    const angle = question.assessmentAngle || question.assessment_angle || "recall";
+    mix[angle] = (mix[angle] || 0) + 1;
+    return mix;
+  }, {});
+  sqlite(`
+    INSERT INTO quiz_memory (
+      id, quiz_id, note_id, title, selected_focus, reason,
+      target_concepts, avoided_concepts, question_mix, model_name, prompt_version, created_at
+    ) VALUES (
+      '${crypto.randomUUID()}',
+      '${sqlEscape(quizId)}',
+      '${sqlEscape(noteId)}',
+      '${sqlEscape(title)}',
+      NULL,
+      '${sqlEscape(reason)}',
+      '${sqlEscape(JSON.stringify(targetConcepts))}',
+      '${sqlEscape(JSON.stringify(avoidedConcepts))}',
+      '${sqlEscape(JSON.stringify(questionMix))}',
+      '${sqlEscape(gemmaModel)}',
+      '${sqlEscape(promptVersion)}',
+      ${Date.now() / 1000}
+    );
+  `);
+}
+
+function conceptSetFingerprintFromKeys(keys) {
+  return [...new Set((keys || []).map(String).filter(Boolean))].sort().join("||");
+}
+
+function quizConceptSetFingerprint(questions) {
+  return conceptSetFingerprintFromKeys((questions || []).map((question) => canonicalConceptKey(question)));
+}
+
+function recentMasteredQuizFingerprints(noteId) {
+  return new Set(sqlite(`
+    SELECT qm.target_concepts
+    FROM quiz_memory qm
+    JOIN quiz_sessions qs ON qs.id = qm.quiz_id
+    WHERE qm.note_id = '${sqlEscape(noteId)}'
+      AND qm.title = 'Completed quiz'
+      AND qs.score >= 0.999
+    ORDER BY qm.created_at DESC
+    LIMIT 12
+  `, { json: true }).map((row) => {
+    try {
+      return conceptSetFingerprintFromKeys(JSON.parse(row.target_concepts || "[]"));
+    } catch {
+      return "";
+    }
+  }).filter(Boolean));
+}
+
+function quizExpansionPromptFor(note, details, target, options = {}) {
   const existing = sqlite(`
     SELECT
       q.topic,
@@ -849,6 +1540,20 @@ function quizExpansionPromptFor(note, details, target) {
     ORDER BY q.created_at DESC
     LIMIT 80
   `, { json: true });
+  const recentAssigned = sqlite(`
+    SELECT
+      a.topic_snapshot AS topic,
+      a.subtopic_snapshot AS subtopic,
+      a.prompt_snapshot AS prompt,
+      a.answer_snapshot AS answer,
+      a.response,
+      a.score,
+      a.created_at
+    FROM attempts a
+    WHERE a.note_id = '${sqlEscape(note.id)}'
+    ORDER BY a.created_at DESC
+    LIMIT 30
+  `, { json: true });
   const weak = details
     .filter((item) => item.score < 1)
     .map((item) => ({
@@ -858,17 +1563,85 @@ function quizExpansionPromptFor(note, details, target) {
       learner_answer: item.response,
       correct_answer: item.answer
     }));
+  const quizScore = details.length
+    ? details.reduce((sum, item) => sum + Number(item.score || 0), 0) / details.length
+    : 0;
+
+  if (options.force) {
+    const mastered = details.map((item) => ({
+      topic: item.topic,
+      subtopic: item.subtopic,
+      prompt: item.prompt,
+      answer: item.answer,
+      concept: item.canonicalConceptKey || canonicalConceptKey(item)
+    }));
+    return `
+You are Accordian's mastery-expansion agent.
+Use ONLY the note text. Return valid JSON only.
+
+The learner mastered the concepts below. Create ${target} harder or adjacent question objects from the same note.
+Do not repeat any existing prompt. Do not ask the same fact in the same way.
+Prefer comparison, sequence, consequence, and application checks over basic recall.
+Every question must be answerable from the note text.
+Every question needs one multiple_choice variant with exactly 4 choices and the exact answer included.
+
+Return exactly:
+{
+  "questions": [
+    {
+      "topic": "broad topic",
+      "concept": "specific concept",
+      "source_excerpt": "exact evidence from the note",
+      "assessment_angle": "comparison | sequence | consequence | application | cause | detail",
+      "canonical_prompt": "harder note-backed prompt",
+      "canonical_answer": "short source-backed answer",
+      "accepted_answers": ["equivalent answer"],
+      "importance": 1,
+      "difficulty": 1.2,
+      "variants": [
+        {
+          "delivery_type": "multiple_choice",
+          "prompt": "MC prompt",
+          "answer": "correct choice",
+          "choices": ["correct choice", "plausible distractor", "plausible distractor", "plausible distractor"],
+          "rubric": "what understanding this tests"
+        }
+      ]
+    }
+  ]
+}
+
+MASTERED CONCEPTS:
+${JSON.stringify(mastered, null, 2)}
+
+EXISTING PROMPTS TO AVOID:
+${JSON.stringify(existing.map((item) => item.prompt).slice(0, 60), null, 2)}
+
+NOTE TITLE:
+${note.title}
+
+NOTE TEXT:
+${note.body.slice(0, 6000)}
+`;
+  }
+
+  const learningContext = learningContextForNote(note.id);
 
   return `
 You are Accordian's learning-object expansion agent.
 Use ONLY the note text. Do not use outside facts.
 Create ${target} fresh durable question objects for the NEXT quiz.
+Expansion reason: ${options.reason || "post_quiz_expansion"}.
 
 Goals:
 - Address the learner's missed concepts with adjacent questions, not duplicates.
 - Add new important concepts from the note that are not covered by existing questions.
 - Build from basic recall toward application and comparison when the note supports it.
 - Avoid all existing prompts and avoid trivial wording changes.
+- Avoid repeating recent assigned concepts unless the learner missed that exact concept.
+- If the latest quiz score is 100%, create adjacent or harder concepts from the note instead of repeating mastered concepts.
+- If expansion reason is mastered_repeat_suppressed, the learner already mastered the selected concepts. Generate harder, adjacent, or more integrative checks from the note. Do not return any question that tests the same answer in the same way.
+- Prefer one durable question per distinct concept. Do not create multiple questions whose correct answer is the same fact.
 - Include a multiple_choice variant for every question.
 - Include a short_answer variant when useful.
 - Every multiple_choice variant must have exactly 4 choices and one exact answer present in choices.
@@ -909,6 +1682,15 @@ Return only JSON:
 MISSED CONCEPTS:
 ${JSON.stringify(weak, null, 2)}
 
+LATEST QUIZ SCORE:
+${quizScore}
+
+RECENT ASSIGNED QUESTIONS AND RESULTS:
+${JSON.stringify(recentAssigned, null, 2)}
+
+LEARNING CONTEXT OBJECT FROM SQLITE:
+${JSON.stringify(learningContext, null, 2)}
+
 EXISTING QUESTIONS TO AVOID:
 ${JSON.stringify(existing, null, 2)}
 
@@ -920,26 +1702,28 @@ ${note.body.slice(0, 14000)}
 `;
 }
 
-async function prepareNextQuiz(noteId, details) {
+async function prepareNextQuiz(noteId, details, options = {}) {
   const note = noteSummary(noteId);
   if (!note) return { saved: 0, status: "missing_note" };
   const missCount = details.filter((item) => item.score < 1).length;
   const currentCount = Number(note.questionCount || 0);
   const maxCount = Math.max(questionTargetFor(note.body) * 2, 24);
-  if (currentCount >= maxCount && missCount === 0) {
+  if (!options.force && currentCount >= maxCount && missCount === 0) {
     return { saved: 0, status: "enough_questions" };
   }
 
-  const target = Math.min(12, Math.max(6, missCount * 2, Math.ceil(questionTargetFor(note.body) / 3)));
+  const target = options.force
+    ? Math.min(8, Math.max(6, Math.ceil(questionTargetFor(note.body) / 3)))
+    : Math.min(6, Math.max(4, missCount, Math.ceil(questionTargetFor(note.body) / 4)));
   sqlite(`UPDATE notes SET status = 'building' WHERE id = '${sqlEscape(noteId)}';`);
   try {
-    const result = await gemmaJSON(quizExpansionPromptFor(note, details, target));
-    const saved = insertQuestions(noteId, result.questions || [], "post_quiz_expansion");
+    const result = await gemmaJSON(quizExpansionPromptFor(note, details, target, options));
+    const saved = insertQuestions(noteId, result.questions || [], options.force ? "mastery_expansion" : "post_quiz_expansion");
     sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
     recordModelRun({
       noteId,
-      task: "post_quiz_expansion",
-      promptVersion: "web.quiz_expansion.v1",
+      task: options.force ? "mastery_expansion" : "post_quiz_expansion",
+      promptVersion: options.force ? "web.quiz_mastery_expansion.v1" : "web.quiz_expansion.v1",
       status: "ok",
       detail: `Saved ${saved} fresh questions.`
     });
@@ -948,8 +1732,8 @@ async function prepareNextQuiz(noteId, details) {
     sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
     recordModelRun({
       noteId,
-      task: "post_quiz_expansion",
-      promptVersion: "web.quiz_expansion.v1",
+      task: options.force ? "mastery_expansion" : "post_quiz_expansion",
+      promptVersion: options.force ? "web.quiz_mastery_expansion.v1" : "web.quiz_expansion.v1",
       status: "error",
       detail: error.message || "Expansion failed."
     });
@@ -957,17 +1741,17 @@ async function prepareNextQuiz(noteId, details) {
   }
 }
 
-function queueNextQuiz(noteId, details) {
+function queueNextQuiz(noteId, details, options = {}) {
   if (expansionInFlight.has(noteId)) {
     return { status: "already_preparing", saved: 0 };
   }
   expansionInFlight.add(noteId);
-  prepareNextQuiz(noteId, details)
+  prepareNextQuiz(noteId, details, options)
     .catch((error) => {
       recordModelRun({
         noteId,
-        task: "post_quiz_expansion",
-        promptVersion: "web.quiz_expansion.v1",
+        task: options.force ? "mastery_expansion" : "post_quiz_expansion",
+        promptVersion: options.force ? "web.quiz_mastery_expansion.v1" : "web.quiz_expansion.v1",
         status: "error",
         detail: error.message || "Expansion failed."
       });
@@ -1027,15 +1811,41 @@ async function submitQuiz(noteId, answers) {
         ${Date.now() / 1000}
       );
     `);
+    saveAnswerEvaluation({
+      attemptId: id,
+      question,
+      noteId,
+      score,
+      verdict: feedback,
+      matchedIdeas: score === 1 ? [expectedAnswer] : [],
+      missingIdeas: score === 1 ? [] : [expectedAnswer]
+    });
     details.push({
       questionId: question.id,
+      variantId: variant?.id || "",
       topic: question.topic,
       subtopic: question.subtopic,
       prompt: promptSnapshot,
       response: answer.response,
       answer: expectedAnswer,
       score,
-      feedback
+      feedback,
+      canonicalConceptKey: canonicalConceptKey(question)
+    });
+    recordUserAction({
+      noteId,
+      actionType: "answer.submitted",
+      objectType: "attempt",
+      objectId: id,
+      payload: {
+        questionId: question.id,
+        variantId: variant?.id || "",
+        prompt: promptSnapshot,
+        response: answer.response || "",
+        expectedAnswer,
+        score,
+        canonicalConceptKey: canonicalConceptKey(question)
+      }
     });
     updateConceptMemory(noteId, question, score);
     updateLearningMemory(noteId, question, variant, score);
@@ -1053,8 +1863,30 @@ async function submitQuiz(noteId, answers) {
       ${Date.now() / 1000}
     );
   `);
+  recordUserAction({
+    noteId,
+    actionType: "quiz.completed",
+    objectType: "quiz_session",
+    objectId: sessionId,
+    payload: {
+      score,
+      attemptIds,
+      details
+    }
+  });
+  saveQuizMemory({
+    noteId,
+    quizId: sessionId,
+    title: "Completed quiz",
+    reason: "Saved completed quiz outcome and concept avoidance signals.",
+    questions: details,
+    details,
+    promptVersion: "quiz_completed.web.v1"
+  });
 
-  const nextQuiz = queueNextQuiz(noteId, details);
+  const nextQuiz = queueNextQuiz(noteId, details, score >= 0.999
+    ? { force: true, reason: "perfect_score_mastery_unlock" }
+    : {});
   return { id: sessionId, score, details, nextQuiz };
 }
 
@@ -1154,6 +1986,15 @@ function sessionDetail(sessionId) {
 }
 
 async function handleAPI(request, response, url) {
+  if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/api/health") {
+    return writeJSON(response, 200, {
+      ok: true,
+      mode: "web",
+      model: gemmaModel,
+      database: dbPath
+    });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/notes") {
     return writeJSON(response, 200, { notes: listNotes() });
   }
@@ -1170,6 +2011,18 @@ async function handleAPI(request, response, url) {
     return writeJSON(response, 200, { sessions: allHistory() });
   }
 
+  if (request.method === "POST" && url.pathname === "/api/actions") {
+    const body = await readJSON(request);
+    recordUserAction({
+      noteId: body.noteId || null,
+      actionType: String(body.actionType || "ui.action"),
+      objectType: String(body.objectType || ""),
+      objectId: String(body.objectId || ""),
+      payload: body.payload || {}
+    });
+    return writeJSON(response, 201, { ok: true });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/wiki/search") {
     const query = String(url.searchParams.get("q") || "").trim();
     if (query.length < 2) return writeJSON(response, 400, { error: "Search needs at least 2 characters." });
@@ -1182,6 +2035,13 @@ async function handleAPI(request, response, url) {
     if (!title) return writeJSON(response, 400, { error: "Wikipedia title is required." });
     const article = await wikipediaArticle(title);
     const note = createNote(article.title, article.text);
+    recordUserAction({
+      noteId: note.id,
+      actionType: "wikipedia.imported",
+      objectType: "note",
+      objectId: note.id,
+      payload: { title: article.title }
+    });
     return writeJSON(response, 201, { note });
   }
 
@@ -1200,15 +2060,27 @@ async function handleAPI(request, response, url) {
     if (!note) return writeJSON(response, 404, { error: "Note not found." });
     sqlite(`UPDATE notes SET status = 'building' WHERE id = '${sqlEscape(noteId)}';`);
     const target = questionTargetFor(note.body);
-    const result = await gemmaJSON(quizPromptFor(note, target));
-    saveQuestions(noteId, result.summary, result.questions || []);
-    return writeJSON(response, 200, { note: noteSummary(noteId) });
+    try {
+      const result = await gemmaJSON(quizPromptFor(note, target));
+      saveQuestions(noteId, result.summary, result.questions || []);
+      return writeJSON(response, 200, { note: noteSummary(noteId) });
+    } catch (error) {
+      sqlite(`UPDATE notes SET status = 'new' WHERE id = '${sqlEscape(noteId)}';`);
+      recordModelRun({
+        noteId,
+        task: "initial_quiz_build",
+        promptVersion: "web.initial_quiz_build.v2",
+        status: "error",
+        detail: error.message || "Initial build failed."
+      });
+      return writeJSON(response, 500, { error: error.message || "Initial build failed." });
+    }
   }
 
   const quizMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/quiz$/);
   if (request.method === "GET" && quizMatch) {
     const noteId = quizMatch[1];
-    return writeJSON(response, 200, { questions: startQuiz(noteId) });
+    return writeJSON(response, 200, startQuiz(noteId));
   }
 
   const submitMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/quiz$/);
@@ -1221,6 +2093,11 @@ async function handleAPI(request, response, url) {
   const historyMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/history$/);
   if (request.method === "GET" && historyMatch) {
     return writeJSON(response, 200, { sessions: history(historyMatch[1]) });
+  }
+
+  const contextMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/learning-context$/);
+  if (request.method === "GET" && contextMatch) {
+    return writeJSON(response, 200, { context: learningContextForNote(contextMatch[1]) });
   }
 
   const sessionMatch = url.pathname.match(/^\/api\/quiz-sessions\/([^/]+)$/);
@@ -1244,7 +2121,8 @@ function serveStatic(response, pathname) {
     ".html": "text/html",
     ".css": "text/css",
     ".js": "application/javascript",
-    ".svg": "image/svg+xml"
+    ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json"
   }[extname(filePath)] || "application/octet-stream";
   response.writeHead(200, { "content-type": type });
   response.end(readFileSync(filePath));
@@ -1263,7 +2141,7 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`Accordian web running at http://localhost:${port}`);
+server.listen(port, host, () => {
+  console.log(`Accordian web running at http://${host}:${port}`);
   console.log(`Gemma endpoint: ${gemmaBaseURL} (${gemmaModel})`);
 });

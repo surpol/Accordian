@@ -2,32 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Accordian Web</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f8fafd" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Accordian" />
+    <title>Accordian</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Gemma + SQLite learning system</p>
+          <p class="eyebrow">Private learning assistant</p>
           <h1>Accordian</h1>
-          <p class="subtitle">Turn notes into quizzes, feedback, and visible learning evidence.</p>
+          <p class="subtitle">Turn anything you save into a guided quiz journey.</p>
         </div>
         <div class="status" id="modelStatus">Checking model...</div>
       </header>
 
       <nav class="tabbar" aria-label="Main navigation">
-        <button class="tab active" data-tab="learn">Learn</button>
-        <button class="tab" data-tab="notes">Notes</button>
-        <button class="tab" data-tab="quizzes">Quizzes</button>
+        <button class="tab active" data-tab="learn">Home</button>
+        <button class="tab" data-tab="notes">Library</button>
+        <button class="tab" data-tab="quizzes">History</button>
       </nav>
 
       <section class="view active" id="learnView">
         <div class="learn-grid">
           <aside class="panel stack-panel">
             <div class="panel-header">
-              <h2>Note Stack</h2>
+              <h2>Journeys</h2>
               <button class="icon-button" id="refreshButton" title="Refresh">↻</button>
             </div>
             <div id="learnNotesList" class="notes-list"></div>
@@ -42,22 +49,23 @@
             </div>
 
             <div class="metrics">
-              <div>
-                <span id="questionCount">0</span>
-                <p>Questions</p>
-              </div>
-              <div>
-                <span id="attemptCount">0</span>
-                <p>Attempts</p>
-              </div>
-              <div>
-                <span id="understandingScore">0%</span>
-                <p>Understanding</p>
+              <div class="progress-card">
+                <div class="progress-heading">
+                  <div>
+                    <span id="understandingScore">0%</span>
+                    <p>understood</p>
+                  </div>
+                  <strong id="questionCount">0 checks ready</strong>
+                </div>
+                <div class="progress-track" aria-hidden="true">
+                  <div class="progress-fill" id="understandingBar"></div>
+                </div>
+                <p class="muted"><span id="attemptCount">0</span> practice answers saved</p>
               </div>
             </div>
 
             <div class="actions">
-              <button id="buildButton">Build Quiz Bank</button>
+              <button id="buildButton">Build Journey</button>
               <button id="startQuizButton" class="secondary">Start Quiz</button>
             </div>
 
@@ -71,7 +79,7 @@
           <section class="panel editor-panel">
             <div class="panel-header">
               <div>
-                <h2>Add Notes</h2>
+                <h2>Library</h2>
                 <p class="muted">Paste text or import a Wikipedia article.</p>
               </div>
             </div>
@@ -91,13 +99,16 @@
             <form id="noteForm" class="note-form">
               <input id="noteTitle" placeholder="Note title" />
               <textarea id="noteBody" placeholder="Paste a text stream here"></textarea>
-              <button type="submit">Save Note</button>
+              <div class="form-actions">
+                <button type="submit" id="saveNoteButton">Save Note</button>
+                <button type="button" id="clearNoteButton" class="secondary">New Note</button>
+              </div>
             </form>
           </section>
 
           <section class="panel">
             <div class="panel-header">
-              <h2>Saved Notes</h2>
+              <h2>Saved Journeys</h2>
             </div>
             <div id="notesList" class="notes-list"></div>
           </section>
@@ -109,8 +120,8 @@
           <section class="panel">
             <div class="panel-header">
               <div>
-                <h2>Quiz History</h2>
-                <p class="muted">Tap a session to inspect answers and feedback.</p>
+                <h2>History</h2>
+                <p class="muted">Review answers and feedback from past quizzes.</p>
               </div>
             </div>
             <div id="historyList" class="history-list"></div>

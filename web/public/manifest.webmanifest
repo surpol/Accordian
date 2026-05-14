@@ -1,0 +1,19 @@
+{
+  "name": "Accordian",
+  "short_name": "Accordian",
+  "description": "Turn notes into guided quizzes and learning evidence.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8fafd",
+  "theme_color": "#f8fafd",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

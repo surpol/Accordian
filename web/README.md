@@ -59,3 +59,5 @@ Tables:
 ## Public Demo Path
 
 For a domain, deploy this folder to a server that can run Node and write SQLite data. The public server also needs a reachable Gemma-compatible endpoint; judges cannot access your Mac's local Ollama server.
+
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for Docker and Render deployment.
