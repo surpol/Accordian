@@ -1,5 +1,5 @@
 import http from "node:http";
-import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync, unlinkSync, copyFileSync } from "node:fs";
 import { extname, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -357,9 +357,56 @@ async function readJSON(request) {
   return text ? JSON.parse(text) : {};
 }
 
+async function readRequestBuffer(request, maxBytes = 50 * 1024 * 1024) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      throw new Error("Backup file is too large.");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 function writeJSON(response, status, payload) {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(payload));
+}
+
+function exportBackup(response) {
+  sqlite("PRAGMA wal_checkpoint(TRUNCATE);");
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  response.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-disposition": `attachment; filename="accordian-backup-${stamp}.sqlite"`
+  });
+  response.end(readFileSync(dbPath));
+}
+
+async function restoreBackup(request) {
+  const buffer = await readRequestBuffer(request);
+  if (buffer.length < 100 || buffer.slice(0, 16).toString("utf8") !== "SQLite format 3\u0000") {
+    throw new Error("This is not a valid Accordian backup file.");
+  }
+
+  const tempPath = join(dataDir, `restore-${crypto.randomUUID()}.sqlite`);
+  const oldPath = join(dataDir, `before-restore-${Date.now()}.sqlite`);
+  writeFileSync(tempPath, buffer);
+  try {
+    const check = spawnSync("sqlite3", [tempPath, "PRAGMA integrity_check;"], { encoding: "utf8" });
+    if (check.status !== 0 || !String(check.stdout || "").includes("ok")) {
+      throw new Error("Backup integrity check failed.");
+    }
+    if (existsSync(dbPath)) copyFileSync(dbPath, oldPath);
+    renameSync(tempPath, dbPath);
+    initDB();
+    return { ok: true, notes: listNotes() };
+  } catch (error) {
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+    throw error;
+  }
 }
 
 async function wikipediaJSON(params) {
@@ -670,7 +717,15 @@ function questionTargetFor(text) {
   return 32;
 }
 
+function isMathNote(note) {
+  return /^##\s*Math Topic:/i.test(String(note?.body || ""));
+}
+
 function minimumQuestionBankFor(note) {
+  if (isMathNote(note)) return 4;
+  const words = String(note?.body || "").trim().split(/\s+/).filter(Boolean).length;
+  if (words < 80) return 3;
+  if (words < 160) return 4;
   return Math.min(6, Math.max(5, questionTargetFor(note?.body || "")));
 }
 
@@ -679,7 +734,51 @@ function noteNeedsQuestionBackfill(note) {
 }
 
 function quizPromptFor(note, target) {
-  const safeTarget = Math.min(8, Math.max(5, target));
+  const safeTarget = isMathNote(note) ? 4 : Math.min(8, Math.max(5, target));
+  if (isMathNote(note)) {
+    return `
+You are creating a short math quiz from a structured math note.
+Use ONLY the note text. Do not use outside facts.
+Create exactly ${safeTarget} useful multiple-choice question objects.
+Cover formula recall, worked-example reasoning, common mistakes, and practice application.
+Keep prompts concise. Make every answer exactly match one of the 4 choices.
+Return valid JSON only. No markdown. No commentary.
+
+Return only JSON:
+{
+  "summary": "1 sentence student-friendly summary",
+  "questions": [
+    {
+      "topic": "math topic",
+      "concept": "specific concept",
+      "segment": "specific subtopic",
+      "source_excerpt": "exact note-backed text this question tests",
+      "assessment_angle": "definition | procedure | mistake | application",
+      "canonical_prompt": "stable question",
+      "canonical_answer": "source-backed answer",
+      "accepted_answers": ["equivalent answer"],
+      "importance": 0.8,
+      "difficulty": 0.6,
+      "variants": [
+        {
+          "delivery_type": "multiple_choice",
+          "prompt": "MC prompt",
+          "answer": "correct choice",
+          "choices": ["correct choice", "distractor", "distractor", "distractor"],
+          "rubric": "what must be known"
+        }
+      ]
+    }
+  ]
+}
+
+NOTE TITLE:
+${note.title}
+
+NOTE TEXT:
+${note.body.slice(0, 2200)}
+`;
+  }
   return `
 You are building durable learning objects for an education app.
 Use ONLY the note text. Do not use outside facts.
@@ -690,6 +789,7 @@ For cause/effect or sequence questions, the answer must be temporally consistent
 Prefer one durable question per distinct concept. Do not create multiple questions whose correct answer is the same fact.
 Each question object must include one multiple_choice variant.
 Every multiple_choice variant must have exactly 4 choices and one exact answer that appears in choices.
+If source text says "As of the 2025 season" with a cumulative/team-history record, phrase the prompt as "as of the 2025 season" or "through the 2025 season"; do not ask for "the 2025 season record" unless the note gives that single-season record.
 Return valid JSON only. No markdown. No commentary.
 
 Return only JSON:
@@ -1095,6 +1195,34 @@ function normalizeChoice(value) {
   return normalizeText(value).replace(/\s+/g, " ").trim();
 }
 
+function recordNumbers(value) {
+  const match = String(value || "").match(/(\d{1,4})\s*[–-]\s*(\d{1,4})(?:\s*[–-]\s*(\d{1,4}))?\s*\(\.\d{3}\)/);
+  if (!match) return null;
+  return {
+    wins: Number(match[1]),
+    losses: Number(match[2]),
+    ties: Number(match[3] || 0)
+  };
+}
+
+function looksLikeCumulativeRecord(value) {
+  const record = recordNumbers(value);
+  if (!record) return false;
+  return record.wins + record.losses + record.ties > 25;
+}
+
+function repairSeasonRecordPrompt(prompt, answer, sourceExcerpt = "") {
+  let cleanPrompt = String(prompt || "").trim();
+  if (!cleanPrompt) return cleanPrompt;
+  if (!looksLikeCumulativeRecord(answer)) return cleanPrompt;
+  const source = normalizeText(sourceExcerpt);
+  const hasAsOfSeasonEvidence = /\bas of (the )?\d{4} season\b/.test(source);
+  if (!hasAsOfSeasonEvidence) return cleanPrompt;
+  cleanPrompt = cleanPrompt.replace(/\bfor the (\d{4}) season\b/gi, "as of the $1 season");
+  cleanPrompt = cleanPrompt.replace(/\bfor (\d{4})\b/gi, "as of $1");
+  return cleanPrompt;
+}
+
 function validatedMultipleChoiceVariant(variant, fallbackPrompt, fallbackAnswer) {
   const prompt = String(variant.prompt || fallbackPrompt || "").trim();
   const rawAnswer = String(variant.answer || fallbackAnswer || "").trim();
@@ -1149,7 +1277,11 @@ function hasSourceBackedDistractor(variant, sourceText) {
 
 function insertVariant(noteId, questionId, variant) {
   const type = String(variant.delivery_type || variant.deliveryType || "multiple_choice").trim();
-  const prompt = String(variant.prompt || "").trim();
+  const prompt = repairSeasonRecordPrompt(
+    variant.prompt || "",
+    variant.answer || "",
+    variant.source_excerpt || variant.sourceExcerpt || variant.evidence || ""
+  );
   const answer = String(variant.answer || "").trim();
   if (!prompt || !answer) return false;
   const choices = Array.isArray(variant.choices) ? variant.choices.filter(Boolean).map(String) : [];
@@ -1193,10 +1325,12 @@ function insertQuestions(noteId, questions, generationSource) {
           choices: question.choices,
           rubric: question.grading_rubric || ""
         }];
-    const prompt = String(question.canonical_prompt || question.prompt || variants[0]?.prompt || "").trim();
+    const sourceExcerpt = question.source_excerpt || question.sourceExcerpt || question.evidence || "";
+    const rawPrompt = String(question.canonical_prompt || question.prompt || variants[0]?.prompt || "").trim();
     const answer = String(question.canonical_answer || question.answer || variants[0]?.answer || "").trim();
+    const prompt = repairSeasonRecordPrompt(rawPrompt, answer, sourceExcerpt);
     const fingerprint = promptFingerprint(prompt);
-    const normalizedQuestion = { ...question, prompt, answer };
+    const normalizedQuestion = { ...question, prompt, answer, source_excerpt: sourceExcerpt };
     const signature = conceptSignature(normalizedQuestion);
     const canonicalKey = canonicalConceptKey(normalizedQuestion);
     const conceptRoot = conceptRootKey(normalizedQuestion);
@@ -1225,6 +1359,8 @@ function insertQuestions(noteId, questions, generationSource) {
       ? (question.accepted_answers || question.acceptedAnswers)
       : [answer];
     const mcVariant = variants.find((variant) => (variant.delivery_type || variant.deliveryType || "multiple_choice") === "multiple_choice") || variants[0] || {};
+    mcVariant.prompt = repairSeasonRecordPrompt(mcVariant.prompt || prompt, mcVariant.answer || answer, sourceExcerpt);
+    mcVariant.source_excerpt = sourceExcerpt;
     const mcValidation = validatedMultipleChoiceVariant(mcVariant, prompt, answer);
     if (!mcValidation.valid) continue;
     const cleanMCVariant = mcValidation.variant;
@@ -1722,6 +1858,9 @@ function queueInitialQuiz(noteId) {
   if (initialBuildInFlight.has(noteId)) {
     return { status: "already_preparing", saved: 0 };
   }
+  if (initialBuildInFlight.size > 0) {
+    return { status: "deferred", saved: 0 };
+  }
   if (queuedQuizCount(noteId) > 0) {
     return { status: "already_ready", saved: 0 };
   }
@@ -1779,8 +1918,12 @@ function consumeQueuedQuiz(noteId) {
 }
 
 function startQuiz(noteId) {
-  const note = noteSummary(noteId);
+  let note = noteSummary(noteId);
   if (!note) return { questions: [], nextQuiz: { status: "missing_note", saved: 0 } };
+  if (note.status === "building" && !initialBuildInFlight.has(noteId) && !expansionInFlight.has(noteId) && Number(note.questionCount || 0) > 0) {
+    sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
+    note = noteSummary(noteId);
+  }
   if (note.status === "building" || initialBuildInFlight.has(noteId) || expansionInFlight.has(noteId)) {
     return { questions: [], nextQuiz: { status: "preparing", saved: 0 } };
   }
@@ -1826,6 +1969,8 @@ function ensureAutomaticQueues() {
     FROM notes n
     WHERE n.status = 'new'
       AND (SELECT COUNT(*) FROM questions q WHERE q.note_id = n.id) = 0
+    ORDER BY n.created_at
+    LIMIT 1
   `, { json: true });
   for (const note of newNotes) {
     queueInitialQuiz(note.id);
@@ -1850,6 +1995,8 @@ function ensureAutomaticQueues() {
     WHERE n.status = 'ready'
       AND (SELECT COUNT(*) FROM questions q WHERE q.note_id = n.id) > 0
       AND (SELECT COUNT(*) FROM questions q WHERE q.note_id = n.id) < 5
+    ORDER BY n.created_at
+    LIMIT 1
   `, { json: true });
   for (const note of lowBanks) {
     queueInitialQuiz(note.id);
@@ -2641,6 +2788,14 @@ async function handleAPI(request, response, url) {
       endpoint: gemmaBaseURL,
       model: gemmaModel
     });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/backup") {
+    return exportBackup(response);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/backup/restore") {
+    return writeJSON(response, 200, await restoreBackup(request));
   }
 
   if (request.method === "GET" && url.pathname === "/api/quizzes") {

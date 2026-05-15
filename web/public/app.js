@@ -23,7 +23,11 @@ const state = {
   selectedSession: null,
   wikiResults: [],
   noteDraft: storedState.noteDraft || { title: "", body: "" },
+  noteSourceMode: storedState.noteSourceMode || "text",
+  mathTemplateApplied: Boolean(storedState.mathTemplateApplied),
+  mathTemplateKey: storedState.mathTemplateKey || "blank",
   editorMode: storedState.editorMode || "edit",
+  editingNoteId: storedState.editingNoteId || null,
   libraryMode: storedState.libraryMode || "list",
   historyMode: storedState.historyMode || "list",
   waitingForNextQuizNoteId: storedState.waitingForNextQuizNoteId || null,
@@ -43,7 +47,11 @@ function saveLocalState() {
     answers: Object.fromEntries(state.answers),
     index: state.index,
     noteDraft: state.noteDraft,
+    noteSourceMode: state.noteSourceMode,
+    mathTemplateApplied: state.mathTemplateApplied,
+    mathTemplateKey: state.mathTemplateKey,
     editorMode: state.editorMode,
+    editingNoteId: state.editingNoteId,
     libraryMode: state.libraryMode,
     historyMode: state.historyMode,
     waitingForNextQuizNoteId: state.waitingForNextQuizNoteId,
@@ -200,13 +208,23 @@ function setTab(tab) {
 
 function syncBodyModes() {
   document.body.classList.toggle("library-editor", state.tab === "notes" && state.libraryMode === "editor");
+  document.body.classList.toggle("note-editor-new", state.tab === "notes" && state.editorMode === "new");
   document.body.classList.toggle("history-detail", state.tab === "quizzes" && state.historyMode === "detail");
 }
 
 function selectNote(noteId) {
   if (!noteId) return;
+  const isSelected = state.tab === "notes"
+    && state.libraryMode === "editor"
+    && state.editorMode === "edit"
+    && state.editingNoteId === noteId;
+  if (isSelected) {
+    deselectNote(noteId);
+    return;
+  }
   state.activeNoteId = noteId;
   state.editorMode = "edit";
+  state.editingNoteId = noteId;
   state.libraryMode = "editor";
   if (state.quizNoteId !== noteId) {
     clearStoredQuiz();
@@ -214,6 +232,21 @@ function selectNote(noteId) {
   populateNoteEditor();
   render();
   logAction("ui.note.selected", { noteId, objectType: "note", objectId: noteId });
+}
+
+function deselectNote(noteId) {
+  state.editorMode = "new";
+  state.editingNoteId = null;
+  state.libraryMode = "list";
+  state.noteDraft = { title: "", body: "" };
+  state.noteSourceMode = "text";
+  state.wikiResults = [];
+  populateNoteEditor();
+  renderWikiResults();
+  renderNotes();
+  syncBodyModes();
+  saveLocalState();
+  logAction("ui.note.deselected", { noteId, objectType: "note", objectId: noteId });
 }
 
 function renderJourneySelect() {
@@ -235,16 +268,16 @@ function renderJourneySelect() {
 }
 
 function populateNoteEditor() {
-  const note = state.editorMode === "new" ? null : activeNote();
+  const note = state.editorMode === "new"
+    ? null
+    : state.notes.find((candidate) => candidate.id === state.editingNoteId) || activeNote();
   if (!$("noteTitle") || !$("noteBody")) return;
-  const shouldOpenWiki = state.editorMode === "new" && !$("noteTitle").value.trim() && !$("noteBody").value.trim();
   if (!note) {
-    if ($("editorTitle")) $("editorTitle").textContent = "New Note";
-    if ($("editorSubtitle")) $("editorSubtitle").textContent = "Paste text or import from Wikipedia.";
+    if ($("editorTitle")) $("editorTitle").textContent = "Add Note";
     if ($("noteMenu")) $("noteMenu").hidden = true;
     $("noteSummaryBox").hidden = true;
-    if (shouldOpenWiki) document.querySelector(".wiki-box")?.setAttribute("open", "");
-    else document.querySelector(".wiki-box")?.removeAttribute("open");
+    if ($("sourceChooser")) $("sourceChooser").hidden = false;
+    updateSourceModeUI();
     $("noteTitle").value = state.noteDraft.title || "";
     $("noteBody").value = state.noteDraft.body || "";
     $("saveNoteButton").textContent = "Save Note";
@@ -254,11 +287,14 @@ function populateNoteEditor() {
   if ($("editorTitle")) $("editorTitle").textContent = note.title || "Note";
   if ($("editorSubtitle")) $("editorSubtitle").textContent = "Source text";
   if ($("noteMenu")) $("noteMenu").hidden = false;
+  if ($("sourceChooser")) $("sourceChooser").hidden = true;
+  if ($("mathBox")) $("mathBox").hidden = true;
   $("noteSummaryBox").hidden = false;
   $("noteSummaryText").textContent = note.summary || (note.status === "building"
     ? "Gemma is reading this note now."
     : "No summary yet. Save or rebuild this note to generate one.");
   document.querySelector(".wiki-box")?.removeAttribute("open");
+  document.querySelector(".wiki-box").hidden = true;
   $("noteTitle").value = note.title || "";
   $("noteBody").value = note.body || "";
   $("saveNoteButton").textContent = "Save Changes";
@@ -267,21 +303,412 @@ function populateNoteEditor() {
 
 function clearNoteEditor() {
   state.editorMode = "new";
+  state.editingNoteId = null;
   state.libraryMode = "editor";
   state.noteDraft = { title: "", body: "" };
-  $("noteTitle").value = "";
-  $("noteBody").value = "";
-  $("noteSummaryBox").hidden = true;
-  $("saveNoteButton").textContent = "Save Note";
-  $("clearNoteButton").hidden = true;
-  document.querySelector(".wiki-box")?.setAttribute("open", "");
+  state.noteSourceMode = "text";
+  state.mathTemplateApplied = false;
+  state.mathTemplateKey = "blank";
+  state.wikiResults = [];
+  populateNoteEditor();
+  renderWikiResults();
+  renderNotes();
+  syncBodyModes();
   saveLocalState();
-  render();
+}
+
+function updateSourceModeUI() {
+  const mode = state.noteSourceMode || "text";
+  const copy = {
+    text: {
+      subtitle: "Paste any text stream.",
+      title: "Note title",
+      body: "Paste a text stream here"
+    },
+    wikipedia: {
+      subtitle: "Search Wikipedia, import, then save.",
+      title: "Article title",
+      body: "Imported article text will appear here"
+    },
+    math: {
+      subtitle: "Describe the concept, rules, examples, and practice goal.",
+      title: "Math topic",
+      body: "Add formulas, worked examples, and what feels confusing"
+    }
+  }[mode];
+
+  if ($("editorSubtitle")) $("editorSubtitle").textContent = copy.subtitle;
+  if ($("noteTitle")) $("noteTitle").placeholder = copy.title;
+  if ($("noteBody")) $("noteBody").placeholder = copy.body;
+  if ($("mathBox")) $("mathBox").hidden = mode !== "math";
+  if ($("manualNoteFields")) $("manualNoteFields").hidden = mode === "wikipedia";
+  if ($("saveNoteButton")) $("saveNoteButton").hidden = mode === "wikipedia";
+
+  const wikiBox = document.querySelector(".wiki-box");
+  if (wikiBox) {
+    wikiBox.hidden = mode !== "wikipedia";
+    if (mode === "wikipedia") wikiBox.setAttribute("open", "");
+    else wikiBox.removeAttribute("open");
+  }
+
+  document.querySelectorAll("[data-source-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.sourceMode === mode);
+  });
+}
+
+function setSourceMode(mode) {
+  if (state.noteSourceMode === "math" && mode !== "math") {
+    clearMathTemplateIfUnchanged();
+  }
+  state.noteSourceMode = mode;
+  updateSourceModeUI();
+  saveLocalState();
+}
+
+function mathTemplateTitle() {
+  return mathTemplateTitleFor(state.mathTemplateKey || "blank");
+}
+
+function mathTemplateBody() {
+  return mathTemplateBodyFor(state.mathTemplateKey || "blank");
+}
+
+function mathTemplateTitleFor(key) {
+  const titles = {
+    "clock-hands": "Finding the Angle Between Clock Hands",
+    "linear-equations": "Solving Linear Equations",
+    quadratics: "Solving Quadratic Equations",
+    "percent-change": "Finding Percent Change",
+    pythagorean: "Using the Pythagorean Theorem"
+  };
+  return titles[key] || "Math practice";
+}
+
+function mathTemplateBodyFor(key) {
+  if (key === "clock-hands") {
+    return [
+      "## Math Topic: Finding the Angle Between Clock Hands",
+      "",
+      "### Concept:",
+      "",
+      "An analog clock is constantly moving.",
+      "The minute hand moves faster than the hour hand, so the angle between them changes every minute.",
+      "",
+      "The goal is to calculate the smallest angle between the two hands at any given time.",
+      "",
+      "### Rules or formulas:",
+      "",
+      "The minute hand moves 360 degrees in 60 minutes.",
+      "",
+      "Minute Angle = 6 x minutes",
+      "",
+      "The hour hand moves 360 degrees in 12 hours, which is 30 degrees per hour.",
+      "It also moves gradually as minutes pass.",
+      "",
+      "Hour Angle = 30 x hour + 0.5 x minutes",
+      "",
+      "Angle = absolute value of (Hour Angle - Minute Angle)",
+      "",
+      "Smallest Angle = min(Angle, 360 - Angle)",
+      "",
+      "Smallest Angle = min(|(30h + 0.5m) - 6m|, 360 - |(30h + 0.5m) - 6m|)",
+      "",
+      "### Worked example:",
+      "",
+      "Find the angle at 3:30.",
+      "",
+      "Minute hand:",
+      "6 x 30 = 180 degrees",
+      "",
+      "Hour hand:",
+      "30 x 3 + 0.5 x 30 = 90 + 15 = 105 degrees",
+      "",
+      "Difference:",
+      "|180 - 105| = 75 degrees",
+      "",
+      "Final answer:",
+      "75 degrees",
+      "",
+      "### Where I get stuck:",
+      "",
+      "- Remembering that the hour hand also moves during the hour",
+      "- Forgetting to take the smaller angle",
+      "- Mixing up which formula belongs to which hand",
+      "- Using military time without converting to 12-hour format",
+      "",
+      "### What I want to practice:",
+      "",
+      "- Finding angles for random times like 7:45, 9:20, and 11:59",
+      "- Writing a function to automate the calculation",
+      "- Visualizing why the hour hand moves slowly",
+      "- Solving the problem mentally without formulas"
+    ].join("\n");
+  }
+
+  if (key === "linear-equations") {
+    return [
+      "## Math Topic: Solving Linear Equations",
+      "",
+      "### Concept:",
+      "",
+      "A linear equation has a variable, usually x, raised only to the first power.",
+      "The goal is to isolate the variable so the equation tells us the value that makes both sides equal.",
+      "",
+      "### Rules or formulas:",
+      "",
+      "Whatever you do to one side of the equation, you must do to the other side.",
+      "",
+      "Use inverse operations:",
+      "- Addition undoes subtraction",
+      "- Subtraction undoes addition",
+      "- Multiplication undoes division",
+      "- Division undoes multiplication",
+      "",
+      "General goal:",
+      "ax + b = c",
+      "ax = c - b",
+      "x = (c - b) / a",
+      "",
+      "### Worked example:",
+      "",
+      "Solve 3x + 5 = 20.",
+      "",
+      "Subtract 5 from both sides:",
+      "3x = 15",
+      "",
+      "Divide both sides by 3:",
+      "x = 5",
+      "",
+      "Check:",
+      "3(5) + 5 = 20",
+      "",
+      "### Where I get stuck:",
+      "",
+      "- Forgetting to do the same operation to both sides",
+      "- Mixing up inverse operations",
+      "- Losing negative signs",
+      "- Dividing before moving constants",
+      "",
+      "### What I want to practice:",
+      "",
+      "- One-step equations",
+      "- Two-step equations like 4x - 7 = 21",
+      "- Equations with negatives",
+      "- Checking my answer by substituting it back in"
+    ].join("\n");
+  }
+
+  if (key === "quadratics") {
+    return [
+      "## Math Topic: Solving Quadratic Equations",
+      "",
+      "### Concept:",
+      "",
+      "A quadratic equation has a squared variable, usually x^2.",
+      "Quadratics can have two solutions, one solution, or no real solutions.",
+      "",
+      "### Rules or formulas:",
+      "",
+      "Standard form:",
+      "ax^2 + bx + c = 0",
+      "",
+      "Factoring method:",
+      "Find two numbers that multiply to c and add to b.",
+      "",
+      "Zero product property:",
+      "If (x - r)(x - s) = 0, then x = r or x = s.",
+      "",
+      "Quadratic formula:",
+      "x = (-b +/- sqrt(b^2 - 4ac)) / 2a",
+      "",
+      "Discriminant:",
+      "b^2 - 4ac tells how many real solutions there are.",
+      "",
+      "### Worked example:",
+      "",
+      "Solve x^2 - 5x + 6 = 0.",
+      "",
+      "Factor:",
+      "(x - 2)(x - 3) = 0",
+      "",
+      "Set each factor equal to zero:",
+      "x - 2 = 0, so x = 2",
+      "x - 3 = 0, so x = 3",
+      "",
+      "Final answer:",
+      "x = 2 or x = 3",
+      "",
+      "### Where I get stuck:",
+      "",
+      "- Forgetting to set the equation equal to zero",
+      "- Mixing up signs while factoring",
+      "- Not knowing when to use the quadratic formula",
+      "- Forgetting that there can be two answers",
+      "",
+      "### What I want to practice:",
+      "",
+      "- Factoring simple quadratics",
+      "- Using the quadratic formula",
+      "- Finding the discriminant",
+      "- Checking both solutions"
+    ].join("\n");
+  }
+
+  if (key === "percent-change") {
+    return [
+      "## Math Topic: Finding Percent Change",
+      "",
+      "### Concept:",
+      "",
+      "Percent change measures how much a value increases or decreases compared with the original value.",
+      "It is useful for prices, grades, populations, statistics, and sports data.",
+      "",
+      "### Rules or formulas:",
+      "",
+      "Change = New Value - Original Value",
+      "",
+      "Percent Change = (Change / Original Value) x 100",
+      "",
+      "If the result is positive, it is a percent increase.",
+      "If the result is negative, it is a percent decrease.",
+      "",
+      "### Worked example:",
+      "",
+      "A price goes from 80 dollars to 100 dollars.",
+      "",
+      "Change:",
+      "100 - 80 = 20",
+      "",
+      "Percent change:",
+      "(20 / 80) x 100 = 25%",
+      "",
+      "Final answer:",
+      "25% increase",
+      "",
+      "### Where I get stuck:",
+      "",
+      "- Dividing by the new value instead of the original value",
+      "- Forgetting to multiply by 100",
+      "- Mixing up increase and decrease",
+      "- Ignoring negative signs",
+      "",
+      "### What I want to practice:",
+      "",
+      "- Price increases",
+      "- Price discounts",
+      "- Grade improvements",
+      "- Word problems where I must identify the original value"
+    ].join("\n");
+  }
+
+  if (key === "pythagorean") {
+    return [
+      "## Math Topic: Using the Pythagorean Theorem",
+      "",
+      "### Concept:",
+      "",
+      "The Pythagorean theorem works only for right triangles.",
+      "It relates the two legs of the triangle to the hypotenuse.",
+      "",
+      "### Rules or formulas:",
+      "",
+      "a^2 + b^2 = c^2",
+      "",
+      "a and b are the legs.",
+      "c is the hypotenuse, which is always across from the right angle.",
+      "",
+      "To find the hypotenuse:",
+      "c = sqrt(a^2 + b^2)",
+      "",
+      "To find a missing leg:",
+      "a = sqrt(c^2 - b^2)",
+      "",
+      "### Worked example:",
+      "",
+      "A right triangle has legs 3 and 4. Find the hypotenuse.",
+      "",
+      "Use the formula:",
+      "3^2 + 4^2 = c^2",
+      "",
+      "Calculate:",
+      "9 + 16 = c^2",
+      "25 = c^2",
+      "c = 5",
+      "",
+      "Final answer:",
+      "5",
+      "",
+      "### Where I get stuck:",
+      "",
+      "- Forgetting that c must be the hypotenuse",
+      "- Using the formula on triangles that are not right triangles",
+      "- Forgetting to take the square root",
+      "- Adding when I should subtract to find a missing leg",
+      "",
+      "### What I want to practice:",
+      "",
+      "- Finding the hypotenuse",
+      "- Finding a missing leg",
+      "- Identifying the hypotenuse in diagrams",
+      "- Recognizing common triples like 3-4-5 and 5-12-13"
+    ].join("\n");
+  }
+
+  return [
+    "Concept:",
+    "",
+    "Rules or formulas:",
+    "",
+    "Worked example:",
+    "",
+    "Where I get stuck:",
+    "",
+    "What I want to practice:"
+  ].join("\n");
+}
+
+function applyMathTemplateByKey(key) {
+  const previousTitle = mathTemplateTitle();
+  const previousBody = mathTemplateBody();
+  const canReplace = state.mathTemplateApplied
+    && ($("noteTitle")?.value || "") === previousTitle
+    && ($("noteBody")?.value || "") === previousBody;
+  state.mathTemplateKey = key;
+  applyMathTemplate({ replace: canReplace });
+}
+
+function clearMathTemplateIfUnchanged() {
+  if (!state.mathTemplateApplied) return;
+  if ($("noteTitle")?.value === mathTemplateTitle()) {
+    $("noteTitle").value = "";
+    state.noteDraft.title = "";
+  }
+  if ($("noteBody")?.value === mathTemplateBody()) {
+    $("noteBody").value = "";
+    state.noteDraft.body = "";
+  }
+  state.mathTemplateApplied = false;
+}
+
+function applyMathTemplate({ replace = false } = {}) {
+  if ($("noteTitle") && (replace || !$("noteTitle").value.trim())) {
+    $("noteTitle").value = mathTemplateTitle();
+    state.noteDraft.title = $("noteTitle").value;
+  }
+  if ($("noteBody") && (replace || !$("noteBody").value.trim())) {
+    $("noteBody").value = mathTemplateBody();
+    state.noteDraft.body = $("noteBody").value;
+  }
+  state.mathTemplateApplied = true;
+  $("noteBody")?.focus();
+  saveLocalState();
 }
 
 function showNotesList() {
   state.libraryMode = "list";
+  state.editingNoteId = null;
   syncBodyModes();
+  renderNotes();
   saveLocalState();
 }
 
@@ -303,7 +730,7 @@ function renderNoteButtons(containerId) {
   }
 
   container.innerHTML = state.notes.map((note) => {
-    const isActive = note.id === state.activeNoteId;
+    const isActive = state.editorMode === "edit" && state.libraryMode === "editor" && note.id === state.editingNoteId;
     const statusType = note.queuedQuizCount > 0
       ? "ready"
       : note.status === "building"
@@ -327,6 +754,7 @@ function renderNoteButtons(containerId) {
             <strong>${escapeHTML(note.title)}</strong>
             <span>${escapeHTML(status)} · ${escapeHTML(meta)}</span>
           </span>
+          <b class="note-understanding">${percent(note.averageScore)}</b>
         </button>
       </div>
     `;
@@ -429,11 +857,9 @@ function renderQuiz() {
   }
 
   const question = state.quiz[state.index];
-  const answeredCount = state.answers.size;
   const selected = state.answers.get(question.id) || "";
   area.innerHTML = `
     <article class="question-card">
-      ${state.quizStartedAt ? `<p class="resume-note">Saved in this browser · ${answeredCount}/${state.quiz.length} answered</p>` : ""}
       <div class="question-topline">
         <span>Check ${state.index + 1} of ${state.quiz.length}</span>
         <span>${escapeHTML(question.topic)}</span>
@@ -662,9 +1088,16 @@ async function loadNotes() {
   const payload = await api("/api/notes");
   state.notes = payload.notes || [];
   reconcileJourneyState();
+  if (state.editingNoteId && !state.notes.some((note) => note.id === state.editingNoteId)) {
+    state.editingNoteId = null;
+    state.editorMode = "new";
+  }
   if (!state.notes.some((note) => note.id === state.activeNoteId)) {
     state.activeNoteId = state.notes[0]?.id || null;
-    if (!state.activeNoteId) state.editorMode = "new";
+    if (!state.activeNoteId) {
+      state.editorMode = "new";
+      state.editingNoteId = null;
+    }
     if (!state.activeNoteId) state.libraryMode = "editor";
   }
   const waitingNote = state.notes.find((note) => note.id === state.waitingForNextQuizNoteId);
@@ -701,10 +1134,12 @@ async function loadSessionDetail(sessionId) {
   renderSessionDetail();
   syncBodyModes();
   saveLocalState();
+  $("sessionDetail")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function saveNote(event) {
   event.preventDefault();
+  if (state.editorMode === "new" && state.noteSourceMode === "wikipedia") return;
   const title = $("noteTitle").value.trim() || "Untitled Note";
   const body = $("noteBody").value.trim();
   if (!body) return;
@@ -713,7 +1148,9 @@ async function saveNote(event) {
   button.disabled = true;
   button.textContent = "Saving...";
   try {
-    const existingNote = state.editorMode === "new" ? null : activeNote();
+    const existingNote = state.editorMode === "new"
+      ? null
+      : state.notes.find((candidate) => candidate.id === state.editingNoteId) || activeNote();
     const path = existingNote ? `/api/notes/${encodeURIComponent(existingNote.id)}` : "/api/notes";
     const payload = await api(path, {
       method: existingNote ? "PUT" : "POST",
@@ -721,6 +1158,7 @@ async function saveNote(event) {
     });
     state.activeNoteId = payload.note.id;
     state.editorMode = "edit";
+    state.editingNoteId = payload.note.id;
     setPrepState(payload.note.id, existingNote
       ? "Accordian is rebuilding this note."
       : "Accordian is preparing your first quiz.");
@@ -747,6 +1185,7 @@ async function deleteNoteById(noteId) {
     clearStoredQuiz();
     state.activeNoteId = null;
     state.editorMode = "new";
+    state.editingNoteId = null;
     state.journeyCompleteNoteId = null;
   }
   await loadNotes();
@@ -790,6 +1229,7 @@ async function importWikipedia(title) {
     });
     state.activeNoteId = payload.note.id;
     state.editorMode = "edit";
+    state.editingNoteId = payload.note.id;
     setPrepState(payload.note.id, "Accordian is preparing your first quiz.");
     state.wikiResults = [];
     $("wikiQuery").value = "";
@@ -797,6 +1237,71 @@ async function importWikipedia(title) {
     setTab("learn");
   } catch (error) {
     $("wikiResults").innerHTML = `<div class="error">${escapeHTML(error.message)}</div>`;
+  }
+}
+
+async function exportBackup() {
+  const button = $("exportBackupButton");
+  button.disabled = true;
+  button.textContent = "Exporting...";
+  try {
+    const response = await fetch("/api/backup");
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: "Export failed." }));
+      throw new Error(error.error || "Export failed.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `accordian-backup-${stamp}.sqlite`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message || "Export failed.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Export";
+  }
+}
+
+async function restoreBackup(file) {
+  if (!file) return;
+  const confirmed = window.confirm("Restore this backup? It will replace the current learning memory on this device.");
+  if (!confirmed) {
+    $("backupFileInput").value = "";
+    return;
+  }
+
+  const button = $("importBackupButton");
+  button.disabled = true;
+  button.textContent = "Importing...";
+  try {
+    const response = await fetch("/api/backup/restore", {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream" },
+      body: file
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Import failed.");
+    clearStoredQuiz();
+    state.notes = payload.notes || [];
+    state.activeNoteId = state.notes[0]?.id || null;
+    state.editorMode = "new";
+    state.editingNoteId = null;
+    state.libraryMode = "list";
+    await loadNotes();
+    await loadSessions();
+    render();
+  } catch (error) {
+    alert(error.message || "Import failed.");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Import";
+    $("backupFileInput").value = "";
   }
 }
 
@@ -857,10 +1362,10 @@ async function submitQuiz() {
 
 async function checkModel() {
   try {
-    const model = await api("/api/model");
-    $("modelStatus").textContent = `${model.model} via ${model.mode}`;
+    await api("/api/model");
+    $("modelStatus").textContent = "Gemma 4";
   } catch {
-    $("modelStatus").textContent = "Model status unavailable";
+    $("modelStatus").textContent = "Gemma 4";
   }
 }
 
@@ -879,13 +1384,21 @@ $("clearNoteButton").addEventListener("click", clearNoteEditor);
 $("newNoteTopButton").addEventListener("click", clearNoteEditor);
 $("backToNotesButton").addEventListener("click", showNotesList);
 $("deleteNoteButton").addEventListener("click", deleteActiveNote);
+document.querySelectorAll("[data-source-mode]").forEach((button) => {
+  button.addEventListener("click", () => setSourceMode(button.dataset.sourceMode));
+});
+document.querySelectorAll("[data-math-template]").forEach((button) => {
+  button.addEventListener("click", () => applyMathTemplateByKey(button.dataset.mathTemplate));
+});
 $("noteTitle").addEventListener("input", () => {
   if (state.editorMode !== "new") return;
+  if ($("noteTitle").value !== mathTemplateTitle()) state.mathTemplateApplied = false;
   state.noteDraft.title = $("noteTitle").value;
   saveLocalState();
 });
 $("noteBody").addEventListener("input", () => {
   if (state.editorMode !== "new") return;
+  if ($("noteBody").value !== mathTemplateBody()) state.mathTemplateApplied = false;
   state.noteDraft.body = $("noteBody").value;
   saveLocalState();
 });
@@ -896,6 +1409,9 @@ $("wikiQuery").addEventListener("keydown", (event) => {
     searchWikipedia();
   }
 });
+$("exportBackupButton")?.addEventListener("click", exportBackup);
+$("importBackupButton")?.addEventListener("click", () => $("backupFileInput")?.click());
+$("backupFileInput")?.addEventListener("change", (event) => restoreBackup(event.target.files?.[0]));
 
 checkModel();
 setTab(state.tab);

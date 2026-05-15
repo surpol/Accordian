@@ -11,16 +11,19 @@
     <title>Accordian</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=36" />
+    <link rel="stylesheet" href="/styles.css?v=65" />
   </head>
   <body>
     <main class="shell">
       <header class="app-header">
-        <div>
-          <h1>Accordian</h1>
-          <p class="subtitle">Learn one note at a time.</p>
+        <div class="brand-lockup">
+          <img class="app-logo" src="/icon.svg" alt="" aria-hidden="true" />
+          <div>
+            <h1>Accordian.ai</h1>
+            <p class="subtitle">Learn one note at a time.</p>
+          </div>
         </div>
-        <div class="status" id="modelStatus">Checking model...</div>
+        <div class="status" id="modelStatus">Gemma 4</div>
       </header>
 
       <nav class="tabbar" aria-label="Main navigation">
@@ -78,9 +81,20 @@
                 <h2>Library</h2>
                 <p class="muted">Notes</p>
               </div>
-              <button type="button" id="newNoteTopButton" class="secondary">Add</button>
+              <button type="button" id="newNoteTopButton" class="icon-button add-note-button" aria-label="Add note">+</button>
             </div>
             <div id="notesList" class="notes-list"></div>
+            <section class="backup-box" aria-label="Backup and restore">
+              <div>
+                <strong>Backup</strong>
+                <p>Save or restore your learning memory.</p>
+              </div>
+              <div class="backup-actions">
+                <button type="button" id="exportBackupButton" class="secondary">Export</button>
+                <button type="button" id="importBackupButton" class="secondary">Import</button>
+                <input id="backupFileInput" type="file" accept=".sqlite,.db,.accordian,application/octet-stream" hidden />
+              </div>
+            </section>
           </section>
 
           <section class="panel editor-panel">
@@ -101,8 +115,54 @@
                 <span>Gemma summary</span>
                 <p id="noteSummaryText"></p>
               </section>
-              <input id="noteTitle" placeholder="Note title" />
-              <textarea id="noteBody" placeholder="Paste a text stream here"></textarea>
+              <section class="source-chooser" id="sourceChooser" aria-label="Choose note source">
+                <button type="button" class="source-option active" data-source-mode="text">
+                  <span>Text</span>
+                  <small>Paste notes</small>
+                </button>
+                <button type="button" class="source-option" data-source-mode="wikipedia">
+                  <span>Wikipedia</span>
+                  <small>Import article</small>
+                </button>
+                <button type="button" class="source-option" data-source-mode="math">
+                  <span>Math</span>
+                  <small>Problems + rules</small>
+                </button>
+              </section>
+              <section class="math-box" id="mathBox" hidden>
+                <strong>Math works best with structure.</strong>
+                <p>Choose a structure. Accordian will turn it into targeted practice checks.</p>
+                <div class="math-template-grid">
+                  <button type="button" class="math-template-card" data-math-template="blank">
+                    <span>Custom</span>
+                    <small>Concept, rules, examples</small>
+                  </button>
+                  <button type="button" class="math-template-card" data-math-template="clock-hands">
+                    <span>Clock Hands</span>
+                    <small>Angles on analog clocks</small>
+                  </button>
+                  <button type="button" class="math-template-card" data-math-template="linear-equations">
+                    <span>Linear Equations</span>
+                    <small>Solve for x</small>
+                  </button>
+                  <button type="button" class="math-template-card" data-math-template="quadratics">
+                    <span>Quadratics</span>
+                    <small>Factoring + formula</small>
+                  </button>
+                  <button type="button" class="math-template-card" data-math-template="percent-change">
+                    <span>Percent Change</span>
+                    <small>Increase and decrease</small>
+                  </button>
+                  <button type="button" class="math-template-card" data-math-template="pythagorean">
+                    <span>Pythagorean</span>
+                    <small>Right triangles</small>
+                  </button>
+                </div>
+              </section>
+              <div class="manual-note-fields" id="manualNoteFields">
+                <input id="noteTitle" placeholder="Note title" />
+                <textarea id="noteBody" placeholder="Paste a text stream here"></textarea>
+              </div>
               <div class="form-actions">
                 <button type="submit" id="saveNoteButton">Save Note</button>
                 <button type="button" id="clearNoteButton" class="secondary">New Note</button>
@@ -145,6 +205,6 @@
         </div>
       </section>
     </main>
-    <script src="/app.js?v=36" type="module"></script>
+    <script src="/app.js?v=65" type="module"></script>
   </body>
 </html>
