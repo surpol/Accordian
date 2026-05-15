@@ -11,15 +11,14 @@
     <title>Accordian</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=36" />
   </head>
   <body>
     <main class="shell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Private learning assistant</p>
           <h1>Accordian</h1>
-          <p class="subtitle">Turn anything you save into a guided quiz journey.</p>
+          <p class="subtitle">Learn one note at a time.</p>
         </div>
         <div class="status" id="modelStatus">Checking model...</div>
       </header>
@@ -32,40 +31,38 @@
 
       <section class="view active" id="learnView">
         <div class="learn-grid">
-          <aside class="panel stack-panel">
-            <div class="panel-header">
-              <h2>Journeys</h2>
-              <button class="icon-button" id="refreshButton" title="Refresh">↻</button>
-            </div>
-            <div id="learnNotesList" class="notes-list"></div>
-          </aside>
+          <section class="panel main-panel focus-panel">
+            <div class="home-card">
+              <div class="journey-switcher">
+                <label for="journeySelect">Current note</label>
+                <select id="journeySelect" aria-label="Choose journey"></select>
+                <button class="compat-hidden" id="refreshButton" type="button" aria-hidden="true" tabindex="-1">Refresh</button>
+              </div>
 
-          <section class="panel main-panel">
-            <div class="panel-header">
-              <div>
+              <div class="home-copy">
+                <div class="status-banner" id="noteStatusBanner" hidden>
+                  <span class="status-dot" aria-hidden="true"></span>
+                  <div>
+                    <strong id="noteStatusTitle">Reading note</strong>
+                    <p id="noteStatusDetail">Accordian is turning this text into quiz checks.</p>
+                  </div>
+                </div>
+                <p class="home-label" id="questionCount">0 checks ready</p>
                 <h2 id="activeTitle">Choose a note</h2>
                 <p id="activeSummary" class="muted">Add notes, build questions, then start a quiz.</p>
               </div>
-            </div>
 
-            <div class="metrics">
-              <div class="progress-card">
-                <div class="progress-heading">
-                  <div>
-                    <span id="understandingScore">0%</span>
-                    <p>understood</p>
-                  </div>
-                  <strong id="questionCount">0 checks ready</strong>
+              <div class="home-progress">
+                <div>
+                  <span id="understandingScore">0%</span>
+                  <p>understood</p>
                 </div>
-                <div class="progress-track" aria-hidden="true">
-                  <div class="progress-fill" id="understandingBar"></div>
-                </div>
-                <p class="muted"><span id="attemptCount">0</span> practice answers saved</p>
+                <p class="muted"><span id="attemptCount">0</span> <span id="attemptLabel">checks completed</span></p>
               </div>
-            </div>
 
-            <div class="actions">
-              <button id="startQuizButton">Start Quiz</button>
+              <div class="actions">
+                <button id="startQuizButton">Start Quiz</button>
+              </div>
             </div>
 
             <div id="quizArea" class="quiz-area"></div>
@@ -78,10 +75,10 @@
           <section class="panel library-panel">
             <div class="panel-header">
               <div>
-                <h2>Notes</h2>
-                <p class="muted">Choose a note to edit or quiz.</p>
+                <h2>Library</h2>
+                <p class="muted">Notes</p>
               </div>
-              <button type="button" id="newNoteTopButton" class="secondary">New</button>
+              <button type="button" id="newNoteTopButton" class="secondary">Add</button>
             </div>
             <div id="notesList" class="notes-list"></div>
           </section>
@@ -89,13 +86,21 @@
           <section class="panel editor-panel">
             <div class="panel-header">
               <div>
+                <button type="button" id="backToNotesButton" class="back-button">← Notes</button>
                 <h2 id="editorTitle">New Note</h2>
-                <p class="muted" id="editorSubtitle">Paste text. Accordian will prepare a quiz automatically.</p>
+                <p class="muted" id="editorSubtitle">Paste text. Accordian prepares quizzes automatically.</p>
               </div>
-              <button type="button" id="deleteNoteButton" class="danger ghost">Delete</button>
+              <details class="note-menu" id="noteMenu">
+                <summary aria-label="Note actions">•••</summary>
+                <button type="button" id="deleteNoteButton" class="danger ghost">Delete note</button>
+              </details>
             </div>
 
             <form id="noteForm" class="note-form">
+              <section class="summary-box" id="noteSummaryBox" hidden>
+                <span>Gemma summary</span>
+                <p id="noteSummaryText"></p>
+              </section>
               <input id="noteTitle" placeholder="Note title" />
               <textarea id="noteBody" placeholder="Paste a text stream here"></textarea>
               <div class="form-actions">
@@ -106,8 +111,8 @@
 
             <details class="wiki-box" aria-label="Wikipedia import">
               <summary>
-                <span>Import from Wikipedia</span>
-                <small>Optional</small>
+                <span>Wikipedia</span>
+                <small>Search</small>
               </summary>
               <div class="wiki-search">
                 <input id="wikiQuery" placeholder="Search Wikipedia" />
@@ -121,7 +126,7 @@
 
       <section class="view" id="quizzesView">
         <div class="quiz-history-layout">
-          <section class="panel">
+          <section class="panel history-panel">
             <div class="panel-header">
               <div>
                 <h2>History</h2>
@@ -140,6 +145,6 @@
         </div>
       </section>
     </main>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=36" type="module"></script>
   </body>
 </html>

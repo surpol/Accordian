@@ -24,10 +24,11 @@ const state = {
   wikiResults: [],
   noteDraft: storedState.noteDraft || { title: "", body: "" },
   editorMode: storedState.editorMode || "edit",
+  libraryMode: storedState.libraryMode || "list",
+  historyMode: storedState.historyMode || "list",
   waitingForNextQuizNoteId: storedState.waitingForNextQuizNoteId || null,
   journeyCompleteNoteId: storedState.journeyCompleteNoteId || null,
-  prepState: storedState.prepState || null,
-  lastResult: storedState.lastResult || null
+  prepState: storedState.prepState || null
 };
 
 const $ = (id) => document.getElementById(id);
@@ -43,10 +44,11 @@ function saveLocalState() {
     index: state.index,
     noteDraft: state.noteDraft,
     editorMode: state.editorMode,
+    libraryMode: state.libraryMode,
+    historyMode: state.historyMode,
     waitingForNextQuizNoteId: state.waitingForNextQuizNoteId,
     journeyCompleteNoteId: state.journeyCompleteNoteId,
-    prepState: state.prepState,
-    lastResult: state.lastResult
+    prepState: state.prepState
   }));
 }
 
@@ -86,6 +88,41 @@ function prepElapsedText() {
   const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+function quizSkeletonHTML(title, detail = "") {
+  return `
+    <div class="skeleton-card" aria-busy="true">
+      <div class="skeleton-header">
+        <span class="skeleton-line tiny"></span>
+        <span class="skeleton-pill"></span>
+      </div>
+      <span class="skeleton-line title"></span>
+      <span class="skeleton-line wide"></span>
+      <div class="skeleton-options">
+        <span class="skeleton-option"></span>
+        <span class="skeleton-option"></span>
+        <span class="skeleton-option"></span>
+        <span class="skeleton-option"></span>
+      </div>
+      <div class="skeleton-footer">
+        <strong>${escapeHTML(title)}</strong>
+        ${detail ? `<span>${escapeHTML(detail)}</span>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function compactPrepHTML(title, detail = "") {
+  return `
+    <div class="prep-line" aria-busy="true">
+      <span class="status-dot" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHTML(title)}</strong>
+        ${detail ? `<p>${escapeHTML(detail)}</p>` : ""}
+      </div>
+    </div>
+  `;
 }
 
 async function api(path, options = {}) {
@@ -139,8 +176,17 @@ function activeNote() {
   return state.notes.find((note) => note.id === state.activeNoteId) || state.notes[0] || null;
 }
 
+function reconcileJourneyState() {
+  if (!state.journeyCompleteNoteId) return;
+  const completedNote = state.notes.find((note) => note.id === state.journeyCompleteNoteId);
+  if (!completedNote || completedNote.queuedQuizCount > 0 || completedNote.status === "building") {
+    state.journeyCompleteNoteId = null;
+  }
+}
+
 function setTab(tab) {
   state.tab = tab;
+  syncBodyModes();
   document.querySelectorAll(".tab").forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tab);
   });
@@ -152,9 +198,16 @@ function setTab(tab) {
   logAction("ui.tab.selected", { tab });
 }
 
+function syncBodyModes() {
+  document.body.classList.toggle("library-editor", state.tab === "notes" && state.libraryMode === "editor");
+  document.body.classList.toggle("history-detail", state.tab === "quizzes" && state.historyMode === "detail");
+}
+
 function selectNote(noteId) {
+  if (!noteId) return;
   state.activeNoteId = noteId;
   state.editorMode = "edit";
+  state.libraryMode = "editor";
   if (state.quizNoteId !== noteId) {
     clearStoredQuiz();
   }
@@ -163,34 +216,81 @@ function selectNote(noteId) {
   logAction("ui.note.selected", { noteId, objectType: "note", objectId: noteId });
 }
 
+function renderJourneySelect() {
+  const select = $("journeySelect");
+  if (!select) return;
+
+  if (state.notes.length === 0) {
+    select.innerHTML = `<option value="">No journeys yet</option>`;
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
+  select.innerHTML = state.notes.map((note) => {
+    const suffix = note.queuedQuizCount > 0 ? "quiz ready" : note.status === "building" ? "preparing" : "saved";
+    return `<option value="${escapeHTML(note.id)}">${escapeHTML(note.title)} · ${escapeHTML(suffix)}</option>`;
+  }).join("");
+  select.value = activeNote()?.id || state.notes[0]?.id || "";
+}
+
 function populateNoteEditor() {
   const note = state.editorMode === "new" ? null : activeNote();
   if (!$("noteTitle") || !$("noteBody")) return;
+  const shouldOpenWiki = state.editorMode === "new" && !$("noteTitle").value.trim() && !$("noteBody").value.trim();
   if (!note) {
     if ($("editorTitle")) $("editorTitle").textContent = "New Note";
-    if ($("editorSubtitle")) $("editorSubtitle").textContent = "Paste text. Accordian will prepare a quiz automatically.";
-    if ($("deleteNoteButton")) $("deleteNoteButton").hidden = true;
+    if ($("editorSubtitle")) $("editorSubtitle").textContent = "Paste text or import from Wikipedia.";
+    if ($("noteMenu")) $("noteMenu").hidden = true;
+    $("noteSummaryBox").hidden = true;
+    if (shouldOpenWiki) document.querySelector(".wiki-box")?.setAttribute("open", "");
+    else document.querySelector(".wiki-box")?.removeAttribute("open");
     $("noteTitle").value = state.noteDraft.title || "";
     $("noteBody").value = state.noteDraft.body || "";
     $("saveNoteButton").textContent = "Save Note";
+    $("clearNoteButton").hidden = true;
     return;
   }
-  if ($("editorTitle")) $("editorTitle").textContent = "Edit Note";
-  if ($("editorSubtitle")) $("editorSubtitle").textContent = "Review the source text or delete this note.";
-  if ($("deleteNoteButton")) $("deleteNoteButton").hidden = false;
+  if ($("editorTitle")) $("editorTitle").textContent = note.title || "Note";
+  if ($("editorSubtitle")) $("editorSubtitle").textContent = "Source text";
+  if ($("noteMenu")) $("noteMenu").hidden = false;
+  $("noteSummaryBox").hidden = false;
+  $("noteSummaryText").textContent = note.summary || (note.status === "building"
+    ? "Gemma is reading this note now."
+    : "No summary yet. Save or rebuild this note to generate one.");
+  document.querySelector(".wiki-box")?.removeAttribute("open");
   $("noteTitle").value = note.title || "";
   $("noteBody").value = note.body || "";
-  $("saveNoteButton").textContent = "Save as New Note";
+  $("saveNoteButton").textContent = "Save Changes";
+  $("clearNoteButton").hidden = true;
 }
 
 function clearNoteEditor() {
   state.editorMode = "new";
+  state.libraryMode = "editor";
   state.noteDraft = { title: "", body: "" };
   $("noteTitle").value = "";
   $("noteBody").value = "";
+  $("noteSummaryBox").hidden = true;
   $("saveNoteButton").textContent = "Save Note";
+  $("clearNoteButton").hidden = true;
+  document.querySelector(".wiki-box")?.setAttribute("open", "");
   saveLocalState();
   render();
+}
+
+function showNotesList() {
+  state.libraryMode = "list";
+  syncBodyModes();
+  saveLocalState();
+}
+
+function showHistoryList() {
+  state.historyMode = "list";
+  state.selectedSession = null;
+  renderSessions();
+  syncBodyModes();
+  saveLocalState();
 }
 
 function renderNoteButtons(containerId) {
@@ -204,18 +304,29 @@ function renderNoteButtons(containerId) {
 
   container.innerHTML = state.notes.map((note) => {
     const isActive = note.id === state.activeNoteId;
+    const statusType = note.queuedQuizCount > 0
+      ? "ready"
+      : note.status === "building"
+        ? "pending"
+        : note.status === "ready"
+          ? "saved"
+          : "idle";
     const status = note.queuedQuizCount > 0
-      ? "1 quiz ready"
+      ? "Quiz ready"
       : note.status === "ready"
       ? `${note.questionCount} checks ready`
       : note.status === "building"
         ? "Reading note"
         : "Ready to build";
+    const meta = note.attemptCount === 1 ? "1 check completed" : `${note.attemptCount} checks completed`;
     return `
       <div class="note-row ${isActive ? "active" : ""}">
         <button class="note-card" data-note-id="${escapeHTML(note.id)}">
-          <strong>${escapeHTML(note.title)}</strong>
-          <span>${escapeHTML(status)} · ${percent(note.averageScore)} understood</span>
+          <span class="note-status-dot ${escapeHTML(statusType)}" aria-hidden="true"></span>
+          <span class="note-card-copy">
+            <strong>${escapeHTML(note.title)}</strong>
+            <span>${escapeHTML(status)} · ${escapeHTML(meta)}</span>
+          </span>
         </button>
       </div>
     `;
@@ -230,31 +341,52 @@ function renderActiveNote() {
   const note = activeNote();
   if (!note) {
     $("activeTitle").textContent = "Choose a note";
-    $("activeSummary").textContent = "Add text in Library. Accordian prepares the next quiz automatically.";
-    $("questionCount").textContent = "0 checks ready";
+    $("activeSummary").textContent = "Add a text stream in Library to begin.";
+    $("questionCount").textContent = "No journey";
+    $("noteStatusBanner").hidden = true;
     $("attemptCount").textContent = "0";
+    $("attemptLabel").textContent = "checks completed";
     $("understandingScore").textContent = "0%";
-    $("understandingBar").style.width = "0%";
-    $("startQuizButton").disabled = true;
-    $("quizArea").innerHTML = `<div class="empty">Your learning session will appear here.</div>`;
+    $("startQuizButton").disabled = false;
+    $("startQuizButton").textContent = "Add Notes";
+    $("startQuizButton").onclick = () => {
+      clearNoteEditor();
+      setTab("notes");
+    };
+    $("startQuizButton").hidden = false;
+    $("quizArea").innerHTML = "";
     return;
   }
+
+  $("startQuizButton").onclick = null;
 
   $("activeTitle").textContent = note.title;
   $("activeSummary").textContent = note.summary || "Accordian prepares quizzes automatically from this note.";
   $("questionCount").textContent = note.queuedQuizCount > 0
-    ? "1 quiz ready"
+    ? "Quiz ready"
     : note.status === "building"
-      ? "preparing quiz"
-      : `${note.questionCount} checks saved`;
+      ? "Preparing quiz"
+      : `${note.questionCount} checks`;
   $("attemptCount").textContent = note.attemptCount;
+  $("attemptLabel").textContent = note.attemptCount === 1 ? "check completed" : "checks completed";
   $("understandingScore").textContent = percent(note.averageScore);
-  $("understandingBar").style.width = percent(note.averageScore);
+
+  const isReading = note.status === "building" || state.waitingForNextQuizNoteId === note.id || state.prepState?.noteId === note.id;
+  $("noteStatusBanner").hidden = !isReading;
+  if (isReading) {
+    $("noteStatusTitle").textContent = note.questionCount > 0 ? "Preparing next quiz" : "Reading note";
+    $("noteStatusDetail").textContent = note.questionCount > 0
+      ? "Using your history to shape fresh checks."
+      : "Turning this text into topics and quiz checks.";
+  }
 
   const journeyComplete = state.journeyCompleteNoteId === note.id;
   const hasReadyQuiz = note.queuedQuizCount > 0;
-  $("startQuizButton").disabled = !hasReadyQuiz || state.waitingForNextQuizNoteId === note.id || journeyComplete;
-  $("startQuizButton").textContent = journeyComplete
+  const showJourneyComplete = journeyComplete && !hasReadyQuiz && note.status !== "building";
+  const showingQuiz = state.quiz.length > 0 && state.quizNoteId === note.id;
+  $("startQuizButton").hidden = showingQuiz;
+  $("startQuizButton").disabled = !hasReadyQuiz || state.waitingForNextQuizNoteId === note.id || showJourneyComplete;
+  $("startQuizButton").textContent = showJourneyComplete
     ? "Journey Complete"
     : !hasReadyQuiz && (note.status === "building" || state.waitingForNextQuizNoteId === note.id)
     ? "Preparing Quiz"
@@ -267,18 +399,16 @@ function renderQuiz() {
   if (state.quiz.length > 0 && state.quizNoteId && note && state.quizNoteId !== note.id) {
     clearStoredQuiz();
   }
+  const quizInProgress = state.quiz.length > 0;
+  document.body.classList.toggle("quiz-active", quizInProgress);
   if (state.quiz.length === 0) {
     if (!note) return;
-    if (state.lastResult?.noteId === note.id) {
-      renderQuizResult(state.lastResult, { fromCache: true });
-      return;
-    }
-    if (state.journeyCompleteNoteId === note.id) {
+    if (state.journeyCompleteNoteId === note.id && note.queuedQuizCount === 0 && note.status !== "building") {
       area.innerHTML = `<div class="empty"><strong>Journey complete.</strong><br>Accordian has no fresh quiz set to serve from this note right now. Add more notes or rebuild the journey for harder checks.</div>`;
       return;
     }
     if (note.queuedQuizCount > 0) {
-      area.innerHTML = `<div class="empty">A quiz is ready. Start when you are ready.</div>`;
+      area.innerHTML = "";
       return;
     }
     if (note.status === "building" || state.waitingForNextQuizNoteId === note.id || state.prepState?.noteId === note.id) {
@@ -286,19 +416,15 @@ function renderQuiz() {
         ? state.prepState.message
         : "Accordian is using your last answers to unlock fresh or harder checks.";
       const elapsed = state.prepState?.noteId === note.id ? prepElapsedText() : "";
-      area.innerHTML = `
-        <div class="empty quiz-prep">
-          <div class="spinner" aria-hidden="true"></div>
-          <strong>Preparing your next quiz.</strong>
-          <span>${escapeHTML(message)}</span>
-          ${elapsed ? `<small>${escapeHTML(elapsed)} elapsed. You can review History while this finishes.</small>` : ""}
-        </div>
-      `;
+      area.innerHTML = compactPrepHTML(
+        "Preparing your next quiz",
+        elapsed ? `${message} · ${elapsed} elapsed` : message
+      );
       return;
     }
     area.innerHTML = note.questionCount > 0
-      ? `<div class="empty">Your next quiz is being prepared automatically.</div>`
-      : `<div class="empty">Accordian is preparing your first quiz automatically.</div>`;
+      ? compactPrepHTML("Preparing next quiz")
+      : compactPrepHTML("Preparing first quiz");
     return;
   }
 
@@ -369,14 +495,19 @@ function renderQuiz() {
 
 function renderQuizResult(result, options = {}) {
   const note = activeNote();
-  const stillPreparing = state.prepState?.noteId === result.noteId ||
+  const nextQuizStatus = result.nextQuiz?.status || "";
+  const hasQueuedQuizNow = note?.id === result.noteId && Number(note.queuedQuizCount || 0) > 0;
+  const stillPreparing = !hasQueuedQuizNow && (
+    state.prepState?.noteId === result.noteId ||
     state.waitingForNextQuizNoteId === result.noteId ||
-    ((result.nextQuiz?.status === "preparing" || result.nextQuiz?.status === "already_preparing") && note?.id === result.noteId && note.status === "building");
-  const nextQuizText = stillPreparing
+    ((nextQuizStatus === "preparing" || nextQuizStatus === "already_preparing") && note?.id === result.noteId && note.status === "building")
+  );
+  const nextQuizPreparing = !hasQueuedQuizNow && (stillPreparing || nextQuizStatus === "preparing" || nextQuizStatus === "already_preparing");
+  const nextQuizText = nextQuizPreparing
     ? result.score >= 0.999
       ? "Perfect score. Accordian is unlocking harder checks in the background."
       : "Accordian is preparing fresh follow-up checks in the background."
-    : result.nextQuiz?.status === "preparing" || result.nextQuiz?.status === "already_preparing"
+    : hasQueuedQuizNow || nextQuizStatus === "ready"
       ? "Your next quiz is ready."
       : "Your results were saved for the next quiz.";
   $("quizArea").innerHTML = `
@@ -402,13 +533,13 @@ function renderQuizResult(result, options = {}) {
     await loadSessions();
     await loadSessionDetail(result.id);
   });
-  $("takeAnotherButton").disabled = stillPreparing;
+  $("takeAnotherButton").disabled = nextQuizPreparing;
   $("takeAnotherButton").textContent = $("takeAnotherButton").disabled ? "Preparing..." : "Next Quiz";
   $("takeAnotherButton").addEventListener("click", startQuiz);
 }
 
 function renderNotes() {
-  renderNoteButtons("learnNotesList");
+  renderJourneySelect();
   renderNoteButtons("notesList");
   renderWikiResults();
 }
@@ -433,11 +564,13 @@ function renderSessions() {
   }
 
   if (!state.selectedSession) {
+    state.historyMode = "list";
     $("sessionDetail").innerHTML = `
       <h2>Select a quiz</h2>
       <p class="muted">Tap any quiz to view your answers, correct answers, and feedback.</p>
     `;
   }
+  syncBodyModes();
 }
 
 function renderSessionDetail() {
@@ -448,6 +581,7 @@ function renderSessionDetail() {
   }
 
   $("sessionDetail").innerHTML = `
+    <button type="button" id="backToHistoryButton" class="back-button">← History</button>
     <div class="session-heading">
       <div>
         <p class="eyebrow">${escapeHTML(session.noteTitle)}</p>
@@ -482,6 +616,7 @@ function renderSessionDetail() {
       `).join("")}
     </div>
   `;
+  $("backToHistoryButton").addEventListener("click", showHistoryList);
 }
 
 function renderWikiResults() {
@@ -519,15 +654,18 @@ function render() {
   renderActiveNote();
   renderQuiz();
   renderSessions();
+  syncBodyModes();
   saveLocalState();
 }
 
 async function loadNotes() {
   const payload = await api("/api/notes");
   state.notes = payload.notes || [];
+  reconcileJourneyState();
   if (!state.notes.some((note) => note.id === state.activeNoteId)) {
     state.activeNoteId = state.notes[0]?.id || null;
     if (!state.activeNoteId) state.editorMode = "new";
+    if (!state.activeNoteId) state.libraryMode = "editor";
   }
   const waitingNote = state.notes.find((note) => note.id === state.waitingForNextQuizNoteId);
   if (waitingNote && waitingNote.status !== "building") {
@@ -559,7 +697,10 @@ async function loadSessions() {
 async function loadSessionDetail(sessionId) {
   const payload = await api(`/api/quiz-sessions/${encodeURIComponent(sessionId)}`);
   state.selectedSession = payload.session;
+  state.historyMode = "detail";
   renderSessionDetail();
+  syncBodyModes();
+  saveLocalState();
 }
 
 async function saveNote(event) {
@@ -572,13 +713,17 @@ async function saveNote(event) {
   button.disabled = true;
   button.textContent = "Saving...";
   try {
-    const payload = await api("/api/notes", {
-      method: "POST",
+    const existingNote = state.editorMode === "new" ? null : activeNote();
+    const path = existingNote ? `/api/notes/${encodeURIComponent(existingNote.id)}` : "/api/notes";
+    const payload = await api(path, {
+      method: existingNote ? "PUT" : "POST",
       body: JSON.stringify({ title, body })
     });
     state.activeNoteId = payload.note.id;
     state.editorMode = "edit";
-    setPrepState(payload.note.id, "Accordian is preparing your first quiz.");
+    setPrepState(payload.note.id, existingNote
+      ? "Accordian is rebuilding this note."
+      : "Accordian is preparing your first quiz.");
     state.noteDraft = { title: "", body: "" };
     $("noteTitle").value = "";
     $("noteBody").value = "";
@@ -586,7 +731,7 @@ async function saveNote(event) {
     setTab("learn");
   } finally {
     button.disabled = false;
-    button.textContent = "Save Note";
+    button.textContent = state.editorMode === "new" ? "Save Note" : "Save Changes";
   }
 }
 
@@ -596,12 +741,12 @@ async function deleteNoteById(noteId) {
   const confirmed = window.confirm(`Delete "${note.title}" and its quiz history?`);
   if (!confirmed) return;
   await api(`/api/notes/${encodeURIComponent(noteId)}`, { method: "DELETE" });
+  $("noteMenu")?.removeAttribute("open");
   logAction("ui.note.deleted", { noteId, objectType: "note", objectId: noteId });
   if (state.activeNoteId === noteId) {
     clearStoredQuiz();
     state.activeNoteId = null;
     state.editorMode = "new";
-    state.lastResult = null;
     state.journeyCompleteNoteId = null;
   }
   await loadNotes();
@@ -660,7 +805,8 @@ async function startQuiz() {
   if (!note) return;
   logAction("ui.quiz.start_requested", { noteId: note.id, objectType: "note", objectId: note.id });
   $("startQuizButton").disabled = true;
-  $("quizArea").innerHTML = `<div class="empty">Preparing quiz...</div>`;
+  $("startQuizButton").hidden = false;
+  $("quizArea").innerHTML = quizSkeletonHTML("Opening quiz");
   try {
     const payload = await api(`/api/notes/${encodeURIComponent(note.id)}/quiz`);
     state.quiz = payload.questions || [];
@@ -674,7 +820,6 @@ async function startQuiz() {
     } else {
       clearPrepState(note.id);
       state.journeyCompleteNoteId = state.quiz.length === 0 ? note.id : null;
-      if (state.quiz.length > 0) state.lastResult = null;
     }
     saveLocalState();
     renderQuiz();
@@ -686,7 +831,7 @@ async function startQuiz() {
 async function submitQuiz() {
   const note = activeNote();
   if (!note) return;
-  $("quizArea").innerHTML = `<div class="empty">Grading quiz...</div>`;
+  $("quizArea").innerHTML = quizSkeletonHTML("Grading quiz", "Saving your answers and preparing the review");
   const answers = state.quiz.map((question) => ({
     questionId: question.id,
     variantId: question.variantId || "",
@@ -697,7 +842,6 @@ async function submitQuiz() {
     body: JSON.stringify({ answers })
   });
   clearStoredQuiz();
-  state.lastResult = { ...result, noteId: note.id, savedAt: Date.now() };
   if (result.nextQuiz?.status === "preparing" || result.nextQuiz?.status === "already_preparing") {
     setPrepState(note.id, result.score >= 0.999
       ? "Perfect score. Accordian is unlocking harder checks."
@@ -721,13 +865,19 @@ async function checkModel() {
 }
 
 document.querySelectorAll(".tab").forEach((button) => {
-  button.addEventListener("click", () => setTab(button.dataset.tab));
+  button.addEventListener("click", () => {
+    if (button.dataset.tab === "notes") state.libraryMode = "list";
+    if (button.dataset.tab === "quizzes") state.historyMode = "list";
+    setTab(button.dataset.tab);
+  });
 });
+$("journeySelect")?.addEventListener("change", (event) => selectNote(event.target.value));
 $("noteForm").addEventListener("submit", saveNote);
 $("startQuizButton").addEventListener("click", startQuiz);
-$("refreshButton").addEventListener("click", loadNotes);
+$("refreshButton")?.addEventListener("click", loadNotes);
 $("clearNoteButton").addEventListener("click", clearNoteEditor);
 $("newNoteTopButton").addEventListener("click", clearNoteEditor);
+$("backToNotesButton").addEventListener("click", showNotesList);
 $("deleteNoteButton").addEventListener("click", deleteActiveNote);
 $("noteTitle").addEventListener("input", () => {
   if (state.editorMode !== "new") return;

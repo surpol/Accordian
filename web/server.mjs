@@ -436,6 +436,42 @@ function createNote(title, text) {
   return noteSummary(id);
 }
 
+function updateNote(noteId, title, text) {
+  const note = noteSummary(noteId);
+  if (!note) return null;
+  sqlite(`
+    UPDATE notes
+    SET title = '${sqlEscape(title)}',
+        body = '${sqlEscape(text)}',
+        summary = '',
+        status = 'new'
+    WHERE id = '${sqlEscape(noteId)}';
+
+    DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM question_variants WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM answer_evaluations WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM attempts WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM quiz_sessions WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM quiz_memory WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM learning_memory WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM concept_memory WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM questions WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM concepts WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM learning_segments WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM journey_assignments WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM topics WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM model_runs WHERE note_id = '${sqlEscape(noteId)}';
+  `);
+  recordUserAction({
+    noteId,
+    actionType: "note.updated",
+    objectType: "note",
+    objectId: noteId,
+    payload: { title, wordCount: text.trim().split(/\s+/).filter(Boolean).length }
+  });
+  return noteSummary(noteId);
+}
+
 function recordUserAction({ noteId = null, actionType, objectType = "", objectId = "", payload = {} }) {
   sqlite(`
     INSERT INTO user_actions (
@@ -634,6 +670,14 @@ function questionTargetFor(text) {
   return 32;
 }
 
+function minimumQuestionBankFor(note) {
+  return Math.min(6, Math.max(5, questionTargetFor(note?.body || "")));
+}
+
+function noteNeedsQuestionBackfill(note) {
+  return Number(note?.questionCount || 0) < minimumQuestionBankFor(note);
+}
+
 function quizPromptFor(note, target) {
   const safeTarget = Math.min(8, Math.max(5, target));
   return `
@@ -642,6 +686,7 @@ Use ONLY the note text. Do not use outside facts.
 Create exactly ${safeTarget} useful question objects for a fast first quiz.
 Avoid duplicate prompts. Avoid trivia unless it anchors an important idea.
 Cover definitions, causes, locations, sequences, comparisons, consequences, and applied understanding where the note supports it.
+For cause/effect or sequence questions, the answer must be temporally consistent with the note. A later event cannot cause an earlier event.
 Prefer one durable question per distinct concept. Do not create multiple questions whose correct answer is the same fact.
 Each question object must include one multiple_choice variant.
 Every multiple_choice variant must have exactly 4 choices and one exact answer that appears in choices.
@@ -1183,7 +1228,6 @@ function insertQuestions(noteId, questions, generationSource) {
     const mcValidation = validatedMultipleChoiceVariant(mcVariant, prompt, answer);
     if (!mcValidation.valid) continue;
     const cleanMCVariant = mcValidation.variant;
-    if (hasSourceBackedDistractor(cleanMCVariant, question.source_excerpt || question.sourceExcerpt || "")) continue;
     const choices = cleanMCVariant.choices;
     sqlite(`
       INSERT INTO questions (
@@ -1641,8 +1685,25 @@ async function prepareInitialQuiz(noteId) {
   try {
     const target = questionTargetFor(note.body);
     const result = await gemmaJSON(quizPromptFor(note, target));
-    const saved = saveQuestions(noteId, result.summary, result.questions || []);
-    enqueueQuizForNote(noteId, "starter");
+    let saved = saveQuestions(noteId, result.summary, result.questions || []);
+    const minimum = minimumQuestionBankFor(note);
+    if (saved < minimum) {
+      const backfill = await gemmaJSON(coverageBackfillPromptFor(note, minimum - saved), 90000);
+      saved += insertQuestions(noteId, backfill.questions || [], "initial_coverage_backfill");
+    }
+    const refreshed = noteSummary(noteId);
+    if (noteNeedsQuestionBackfill(refreshed)) {
+      sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
+    } else {
+      enqueueQuizForNote(noteId, "starter");
+    }
+    recordModelRun({
+      noteId,
+      task: "initial_quiz_build",
+      promptVersion: "web.initial_quiz_build.v2",
+      status: "ok",
+      detail: `Saved ${saved} questions. Minimum viable bank: ${minimum}.`
+    });
     return { saved, status: "ready" };
   } catch (error) {
     sqlite(`UPDATE notes SET status = 'new' WHERE id = '${sqlEscape(noteId)}';`);
@@ -1666,6 +1727,13 @@ function queueInitialQuiz(noteId) {
   }
   const note = noteSummary(noteId);
   if (!note) return { status: "missing_note", saved: 0 };
+  if (note.questionCount > 0 && noteNeedsQuestionBackfill(note)) {
+    sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
+    return queueNextQuiz(noteId, [], {
+      force: true,
+      reason: "low_question_bank"
+    });
+  }
   if (note.questionCount > 0) {
     const queued = enqueueQuizForNote(noteId, "starter");
     if (queued.status === "empty") {
@@ -1711,13 +1779,23 @@ function consumeQueuedQuiz(noteId) {
 }
 
 function startQuiz(noteId) {
+  const note = noteSummary(noteId);
+  if (!note) return { questions: [], nextQuiz: { status: "missing_note", saved: 0 } };
+  if (note.status === "building" || initialBuildInFlight.has(noteId) || expansionInFlight.has(noteId)) {
+    return { questions: [], nextQuiz: { status: "preparing", saved: 0 } };
+  }
+  if (note.questionCount > 0 && noteNeedsQuestionBackfill(note)) {
+    sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
+    return {
+      questions: [],
+      nextQuiz: queueNextQuiz(noteId, [], {
+        force: true,
+        reason: "low_question_bank"
+      })
+    };
+  }
   let queuedQuiz = consumeQueuedQuiz(noteId);
   if (!queuedQuiz) {
-    const note = noteSummary(noteId);
-    if (!note) return { questions: [], nextQuiz: { status: "missing_note", saved: 0 } };
-    if (note.status === "building" || initialBuildInFlight.has(noteId) || expansionInFlight.has(noteId)) {
-      return { questions: [], nextQuiz: { status: "preparing", saved: 0 } };
-    }
     const queued = queueInitialQuiz(noteId);
     if (queued.status === "ready" || queued.status === "already_ready") {
       queuedQuiz = consumeQueuedQuiz(noteId);
@@ -1764,6 +1842,17 @@ function ensureAutomaticQueues() {
   `, { json: true });
   for (const note of notes) {
     enqueueQuizForNote(note.id, "startup_repair");
+  }
+
+  const lowBanks = sqlite(`
+    SELECT n.id
+    FROM notes n
+    WHERE n.status = 'ready'
+      AND (SELECT COUNT(*) FROM questions q WHERE q.note_id = n.id) > 0
+      AND (SELECT COUNT(*) FROM questions q WHERE q.note_id = n.id) < 5
+  `, { json: true });
+  for (const note of lowBanks) {
+    queueInitialQuiz(note.id);
   }
 }
 
@@ -2095,6 +2184,7 @@ Goals:
 - Address the learner's missed concepts with adjacent questions, not duplicates.
 - Add new important concepts from the note that are not covered by existing questions.
 - Build from basic recall toward application and comparison when the note supports it.
+- For cause/effect or sequence questions, the answer must be temporally consistent with the note. A later event cannot cause an earlier event.
 - Avoid all existing prompts and avoid trivial wording changes.
 - Avoid repeating recent assigned concepts unless the learner missed that exact concept.
 - Prioritize the untapped note passages from SQLite before creating any question from already-covered areas.
@@ -2179,8 +2269,9 @@ function coverageBackfillPromptFor(note, target) {
     .slice(0, 40);
   return `
 You are Accordian's coverage backfill agent.
-Use ONLY UNTAPPED_PASSAGES. Create exactly 3 fresh multiple-choice question objects.
+Use ONLY UNTAPPED_PASSAGES. Create exactly ${target} fresh multiple-choice question objects.
 Do not reuse or paraphrase any EXISTING_ANSWER_KEYS.
+For cause/effect or sequence questions, the answer must be temporally consistent with the source passage. A later event cannot cause an earlier event.
 Each question needs exactly 4 choices and one exact answer present in choices.
 Incorrect choices must be false for the source excerpt. Do not use another true item from the same list as a distractor.
 Return JSON only:
@@ -2235,7 +2326,7 @@ async function prepareNextQuiz(noteId, details, options = {}) {
     : Math.min(6, Math.max(4, missCount, Math.ceil(questionTargetFor(note.body) / 4)));
   sqlite(`UPDATE notes SET status = 'building' WHERE id = '${sqlEscape(noteId)}';`);
   try {
-    const backfillOnly = options.reason === "no_ready_quiz_unlock";
+    const backfillOnly = options.reason === "no_ready_quiz_unlock" || options.reason === "low_question_bank";
     const result = await gemmaJSON(backfillOnly
       ? coverageBackfillPromptFor(note, target)
       : quizExpansionPromptFor(note, details, target, options),
@@ -2247,7 +2338,13 @@ async function prepareNextQuiz(noteId, details, options = {}) {
       const backfill = await gemmaJSON(coverageBackfillPromptFor(note, target), 90000);
       saved = insertQuestions(noteId, backfill.questions || [], "coverage_backfill");
     }
-    const queued = enqueueQuizForNote(noteId, options.force ? "mastery_expansion" : "follow_up");
+    const refreshed = noteSummary(noteId);
+    const queued = noteNeedsQuestionBackfill(refreshed)
+      ? { status: "insufficient_bank", saved: 0 }
+      : enqueueQuizForNote(noteId, options.force ? "mastery_expansion" : "follow_up");
+    if (queued.status === "insufficient_bank") {
+      sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
+    }
     sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
     recordModelRun({
       noteId,
@@ -2596,6 +2693,18 @@ async function handleAPI(request, response, url) {
   }
 
   const noteMatch = url.pathname.match(/^\/api\/notes\/([^/]+)$/);
+  if ((request.method === "PUT" || request.method === "PATCH") && noteMatch) {
+    const noteId = noteMatch[1];
+    const body = await readJSON(request);
+    const title = String(body.title || "Untitled Note").trim();
+    const text = String(body.body || "").trim();
+    if (!text) return writeJSON(response, 400, { error: "Note text is required." });
+    const note = updateNote(noteId, title, text);
+    if (!note) return writeJSON(response, 404, { error: "Note not found." });
+    queueInitialQuiz(note.id);
+    return writeJSON(response, 200, { note: noteSummary(note.id), nextQuiz: { status: "preparing", saved: 0 } });
+  }
+
   if (request.method === "DELETE" && noteMatch) {
     const noteId = noteMatch[1];
     const deleted = deleteNote(noteId);
