@@ -26,14 +26,14 @@ struct QuizzesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 AppHeader(
-                    title: "Quizzes",
-                    subtitle: "Review your learning evidence."
+                    title: "History",
+                    subtitle: "Quiz attempts, feedback, and learning evidence."
                 )
 
                 if assistant.quizHistory.isEmpty {
                     EmptyInlineState(
                         title: "No quizzes yet",
-                        detail: "Finish a quiz from Ask. Your scores and review signals will appear here.",
+                        detail: "Finish a quiz from Home. Your scores, answers, and feedback will appear here.",
                         systemImage: "checklist",
                         actionTitle: nil,
                         action: nil

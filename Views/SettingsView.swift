@@ -69,7 +69,7 @@ struct SettingsView: View {
         case .localServer:
             assistant.modelConfiguration.modelName
         case .onDevice:
-            "SystemLanguageModel"
+            assistant.modelConfiguration.modelName
         }
     }
 }
@@ -89,7 +89,7 @@ private struct ModelStatusCard: View {
                     .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(configuration.mode == .onDevice ? "On-device model" : configuration.modelName)
+                    Text(configuration.mode == .onDevice ? "Google AI Edge" : configuration.modelName)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -206,8 +206,8 @@ private struct ModelRuntimeSheet: View {
             Form {
                 Section {
                     Picker("Runtime", selection: $mode) {
-                        Text("Local Server").tag(ModelRuntimeConfiguration.Mode.localServer)
-                        Text("On Device").tag(ModelRuntimeConfiguration.Mode.onDevice)
+                        Text(ModelRuntimeConfiguration.Mode.localServer.title).tag(ModelRuntimeConfiguration.Mode.localServer)
+                        Text(ModelRuntimeConfiguration.Mode.onDevice.title).tag(ModelRuntimeConfiguration.Mode.onDevice)
                     }
                     .pickerStyle(.segmented)
                 } footer: {
@@ -215,15 +215,15 @@ private struct ModelRuntimeSheet: View {
                 }
 
                 if mode == .localServer {
-                    Section("Mac Server") {
-                        LabeledContent("Mac Address") {
+                    Section("Gemma Endpoint") {
+                        LabeledContent("Endpoint") {
                             TextField("http://192.168.1.10:11434", text: $serverURLString)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
                                 .multilineTextAlignment(.trailing)
                                 .focused($focusedField, equals: .server)
-                                .accessibilityLabel("Mac address")
+                                .accessibilityLabel("Gemma endpoint")
                         }
 
                         LabeledContent("Model") {
@@ -236,8 +236,23 @@ private struct ModelRuntimeSheet: View {
                         }
 
                         ShareLink(item: macSetupText) {
-                            Label("Send Mac Setup", systemImage: "square.and.arrow.up")
+                            Label("Send Gemma Setup", systemImage: "square.and.arrow.up")
                         }
+                    }
+                } else {
+                    Section("On-device Gemma") {
+                        LabeledContent("Model file") {
+                            TextField("gemma-2-2b-it-8bit.bin", text: $modelName)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .multilineTextAlignment(.trailing)
+                                .focused($focusedField, equals: .model)
+                                .accessibilityLabel("On-device model file")
+                        }
+
+                        Text("Bundle a Google AI Edge compatible Gemma .bin or .task model with the app target. QuizLoop.ai will use SQLite memory locally and run inference through MediaPipe/LiteRT on device.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -301,9 +316,9 @@ private struct ModelRuntimeSheet: View {
     private var runtimeHelpText: String {
         switch mode {
         case .localServer:
-            "Use Gemma through your Mac. If it is unavailable, Accordian will use Apple Intelligence when this device supports it."
+            "Use Gemma through a local endpoint while the bundled on-device runtime is being prepared. QuizLoop.ai does not generate quizzes without a model."
         case .onDevice:
-            "Use Apple Intelligence when the device supports it. This does not require your Mac."
+            "Use Google AI Edge with a bundled Gemma model file. This is the target production offline mode."
         }
     }
 
@@ -311,21 +326,21 @@ private struct ModelRuntimeSheet: View {
         let selectedModel = modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? configuration.modelName : modelName
 
         return """
-        Accordian Mac setup
+        QuizLoop.ai Gemma setup
 
         1. Install the model:
         ollama pull \(selectedModel)
 
-        2. Start Ollama for your phone:
+        2. Start Ollama for this device:
         OLLAMA_HOST=0.0.0.0:11434 ollama serve
 
-        3. Find this Mac's Wi-Fi address:
+        3. Find the server's Wi-Fi address:
         ipconfig getifaddr en0
 
-        4. In Accordian > Settings > Model, paste:
+        4. In QuizLoop.ai > Settings > Model, paste:
         http://YOUR_MAC_WIFI_ADDRESS:11434
 
-        Your iPhone and Mac must be on the same Wi-Fi.
+        Your iPhone and Gemma server must be on the same Wi-Fi.
         """
     }
 }

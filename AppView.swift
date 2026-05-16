@@ -12,7 +12,7 @@ struct AppView: View {
                 }
             }
             .tabItem {
-                Label("Learn", systemImage: "sparkles")
+                Label("Home", systemImage: "house")
             }
             .tag(AppTab.ask)
 
@@ -23,7 +23,7 @@ struct AppView: View {
                 }
             }
             .tabItem {
-                Label("Notes", systemImage: "tray.full")
+                Label("Library", systemImage: "books.vertical")
             }
             .tag(AppTab.notes)
 
@@ -31,7 +31,7 @@ struct AppView: View {
                 QuizzesView()
             }
             .tabItem {
-                Label("Quizzes", systemImage: "checklist")
+                Label("History", systemImage: "clock.arrow.circlepath")
             }
             .tag(AppTab.quizzes)
 

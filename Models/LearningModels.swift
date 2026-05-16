@@ -932,9 +932,9 @@ struct ModelRuntimeConfiguration: Equatable {
         var title: String {
             switch self {
             case .localServer:
-                "Local Server"
+                "Gemma Server"
             case .onDevice:
-                "On Device"
+                "Google AI Edge"
             }
         }
     }

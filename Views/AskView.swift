@@ -197,14 +197,14 @@ struct AskView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 AppHeader(
-                    title: "Accordian",
-                    subtitle: "Learn from your notes."
+                    title: "QuizLoop.ai",
+                    subtitle: "One note. One quiz journey."
                 )
 
                 if assistant.sources.isEmpty {
                     EmptyInlineState(
-                        title: "Add notes first",
-                        detail: "Paste notes or a lecture transcript. Accordian will turn them into a local learning map.",
+                        title: "Add your first note",
+                        detail: "Paste text or import a source. QuizLoop.ai uses Gemma to build a local quiz bank and SQLite to remember every attempt.",
                         systemImage: "doc.text",
                         actionTitle: "Add Notes",
                         action: onAddNotes

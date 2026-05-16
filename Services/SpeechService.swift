@@ -112,7 +112,7 @@ final class SpeechService: NSObject, ObservableObject, AVSpeechSynthesizerDelega
     }
 
     func previewVoice() {
-        speak("Hey, I am Accordian. I can answer from your saved notes and help you understand them.")
+        speak("Hey, I am QuizLoop.ai. I can answer from your saved notes and help you understand them.")
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {

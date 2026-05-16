@@ -1,6 +1,6 @@
 import Foundation
-#if canImport(FoundationModels)
-import FoundationModels
+#if canImport(MediaPipeTasksGenai)
+import MediaPipeTasksGenai
 #endif
 
 struct GemmaMessage: Codable, Equatable {
@@ -47,7 +47,7 @@ struct OllamaGemmaService: GemmaService {
             messages: [
                 GemmaMessage(
                     role: "system",
-                    content: "You are Accordian, a private offline notes assistant for students. Answer from saved notes when they are relevant. Keep answers concise and natural to speak out loud."
+                    content: "You are QuizLoop.ai, a private offline notes assistant for students. Answer from saved notes when they are relevant. Keep answers concise and natural to speak out loud."
                 )
             ] + messages,
             stream: false,
@@ -85,47 +85,103 @@ struct OllamaGemmaService: GemmaService {
     }
 }
 
-#if canImport(FoundationModels)
-@available(iOS 26.0, *)
-final class OnDeviceModelService: GemmaService {
-    var modelName: String { "Apple Intelligence" }
+final class GoogleAIEdgeGemmaService: GemmaService {
+    let modelFileName: String
+    let maxTokens: Int
+    let topK: Int
+    let temperature: Float
+    let randomSeed: Int
+
+    init(
+        modelFileName: String,
+        maxTokens: Int = 1400,
+        topK: Int = 40,
+        temperature: Float = 0.4,
+        randomSeed: Int = 101
+    ) {
+        self.modelFileName = modelFileName
+        self.maxTokens = maxTokens
+        self.topK = topK
+        self.temperature = temperature
+        self.randomSeed = randomSeed
+    }
+
+    var modelName: String { modelFileName }
 
     func reply(to messages: [GemmaMessage]) async throws -> String {
         try await reply(to: messages, timeout: nil)
     }
 
     func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String {
-        var instructionParts = [
-            "You are Accordian, a private offline learning assistant.",
-            "Help the user learn through clear explanations, short study plans, and one-question-at-a-time quizzes.",
-            "Be concise and natural to speak out loud.",
-            "Do not claim cloud access, live web access, or external account access."
-        ]
-
-        for message in messages where message.role == "system" {
-            instructionParts.append(message.content)
+        #if canImport(MediaPipeTasksGenai)
+        guard let modelPath else {
+            throw GemmaServiceError.modelFileMissing(modelFileName)
         }
 
-        let conversationMessages = messages.filter { $0.role != "system" }
-        let priorTurns = conversationMessages.dropLast()
-        if priorTurns.isEmpty == false {
-            let contextLines = priorTurns.map { msg in
-                "\(msg.role == "user" ? "Learner" : "You"): \(msg.content)"
-            }
-            instructionParts.append("Prior conversation:\n" + contextLines.joined(separator: "\n"))
-        }
+        let prompt = Self.prompt(from: messages)
 
-        let session = LanguageModelSession(instructions: instructionParts.joined(separator: "\n"))
-        let lastPrompt = conversationMessages.last?.content ?? ""
-        let response = try await session.respond(to: lastPrompt)
-        return response.content
+        return try await Task.detached(priority: .userInitiated) {
+            let options = LlmInferenceOptions()
+            options.baseOptions.modelPath = modelPath
+            options.maxTokens = maxTokens
+            options.topk = topK
+            options.temperature = temperature
+            options.randomSeed = randomSeed
+
+            let llmInference = try LlmInference(options: options)
+            return try llmInference.generateResponse(inputText: prompt)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.value
+        #else
+        throw GemmaServiceError.aiEdgeRuntimeUnavailable
+        #endif
     }
 
     func isModelInstalled() async throws -> Bool {
-        SystemLanguageModel.default.isAvailable
+        #if canImport(MediaPipeTasksGenai)
+        return modelPath != nil
+        #else
+        throw GemmaServiceError.aiEdgeRuntimeUnavailable
+        #endif
+    }
+
+    private var modelPath: String? {
+        let file = URL(fileURLWithPath: modelFileName)
+        if file.pathExtension.isEmpty == false {
+            return Bundle.main.path(
+                forResource: file.deletingPathExtension().lastPathComponent,
+                ofType: file.pathExtension
+            )
+        }
+
+        return Bundle.main.path(forResource: modelFileName, ofType: "bin")
+            ?? Bundle.main.path(forResource: modelFileName, ofType: "task")
+    }
+
+    private static func prompt(from messages: [GemmaMessage]) -> String {
+        let system = messages
+            .filter { $0.role == "system" }
+            .map(\.content)
+            .joined(separator: "\n")
+
+        let turns = messages
+            .filter { $0.role != "system" }
+            .map { message in
+                "\(message.role == "user" ? "Learner" : "Assistant"): \(message.content)"
+            }
+            .joined(separator: "\n\n")
+
+        return """
+        You are QuizLoop.ai, a private offline learning assistant.
+        Stay grounded in the supplied note context.
+        Return exactly the requested format when the prompt asks for JSON.
+
+        \(system)
+
+        \(turns)
+        """
     }
 }
-#endif
 
 struct OnDeviceGemmaServicePlaceholder: GemmaService {
     let model: String
@@ -139,7 +195,7 @@ struct OnDeviceGemmaServicePlaceholder: GemmaService {
     }
 
     func reply(to messages: [GemmaMessage], timeout: TimeInterval?) async throws -> String {
-        throw GemmaServiceError.onDeviceRuntimeUnavailable
+        throw GemmaServiceError.aiEdgeRuntimeUnavailable
     }
 
     func isModelInstalled() async throws -> Bool {
@@ -169,15 +225,18 @@ private struct OllamaInstalledModel: Codable {
 
 enum GemmaServiceError: LocalizedError {
     case badResponse
-    case onDeviceRuntimeUnavailable
+    case aiEdgeRuntimeUnavailable
+    case modelFileMissing(String)
     case requestTimedOut
 
     var errorDescription: String? {
         switch self {
         case .badResponse:
             "Gemma returned an invalid response."
-        case .onDeviceRuntimeUnavailable:
-            "The on-device Gemma runtime is not bundled yet."
+        case .aiEdgeRuntimeUnavailable:
+            "Google AI Edge is not linked in this build."
+        case .modelFileMissing(let model):
+            "The on-device Gemma model file \(model) is not bundled."
         case .requestTimedOut:
             "Gemma took too long to respond."
         }

@@ -13,7 +13,7 @@ struct NotesView: View {
                     if assistant.sources.isEmpty {
                         EmptyInlineState(
                             title: "No saved notes",
-                            detail: "Paste class notes, summaries, or lecture transcripts. Accordian stores them locally with SQLite.",
+                            detail: "Paste text, articles, chapters, or lecture transcripts. QuizLoop.ai stores the source locally and turns it into quizzes.",
                             systemImage: "doc.text"
                         )
                     } else {
@@ -53,10 +53,10 @@ private struct NotesHeader: View {
     var body: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Notes")
+                Text("Library")
                     .font(.largeTitle.weight(.semibold))
 
-                Text("Source material for your quizzes.")
+                Text("Saved source material.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -70,7 +70,7 @@ private struct NotesHeader: View {
                     .frame(width: 44, height: 44)
                     .background(Color(.systemBackground), in: Circle())
             }
-            .accessibilityLabel("Add Notes")
+            .accessibilityLabel("Add Note")
         }
     }
 }
@@ -299,7 +299,7 @@ private struct NoteDetailView: View {
 
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Accordian will stop using these notes. Flashcards generated from them will also be removed.")
+            Text("QuizLoop.ai will stop using these notes. Flashcards generated from them will also be removed.")
         }
     }
 
@@ -628,7 +628,7 @@ private struct AddNotesView: View {
                     Text("Search, tap an article, save.")
                         .font(.headline.weight(.semibold))
 
-                    Text("Accordian saves the article locally, then builds quizzes from the text.")
+                    Text("QuizLoop.ai saves the article locally, then builds quizzes from the text.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

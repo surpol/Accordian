@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Accordian</string>
+	<string>QuizLoop.ai</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -21,11 +21,11 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Accordian uses the microphone so you can ask questions out loud.</string>
+	<string>QuizLoop.ai uses the microphone so you can ask questions out loud.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Accordian connects to your local model server when you choose Local Server mode.</string>
+	<string>QuizLoop.ai connects to your Gemma endpoint when you choose Gemma Server mode.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Accordian uses on-device speech recognition to turn your voice into assistant prompts.</string>
+	<string>QuizLoop.ai uses on-device speech recognition to turn your voice into assistant prompts.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

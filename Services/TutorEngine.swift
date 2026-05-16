@@ -216,7 +216,7 @@ final class TutorEngine: ObservableObject {
         if savedTurns.isEmpty {
             let welcomeTurn = TutorTurn(
                 speaker: .waves,
-                text: "Hi, I am Accordian. Add notes or ask me anything.",
+                text: "Hi, I am QuizLoop.ai. Add notes or ask me anything.",
                 createdAt: .now
             )
             self.turns = [welcomeTurn]
@@ -356,39 +356,25 @@ final class TutorEngine: ObservableObject {
     func refreshModelReadiness() async {
         modelReadiness = .checking
 
-        if modelConfiguration.mode == .onDevice {
-            #if canImport(FoundationModels)
-            if #available(iOS 26, *) {
-                switch SystemLanguageModel.default.availability {
-                case .available:
-                    modelReadiness = .ready
-                case .unavailable(.deviceNotEligible):
-                    modelReadiness = .deviceNotEligible
-                case .unavailable(.appleIntelligenceNotEnabled):
-                    modelReadiness = .appleIntelligenceNotEnabled
-                case .unavailable(.modelNotReady):
-                    modelReadiness = .appleModelNotReady
-                case .unavailable(_):
-                    modelReadiness = .deviceNotEligible
-                }
-                return
-            }
-            #endif
-            modelReadiness = .deviceNotEligible
-            return
-        }
-
         do {
             let isInstalled = try await gemmaService.isModelInstalled()
             if isInstalled {
-                modelReadiness = .ready
-            } else if await isOnDeviceFallbackAvailable() {
                 modelReadiness = .ready
             } else {
                 modelReadiness = .modelMissing(gemmaService.modelName)
             }
         } catch {
-            modelReadiness = await isOnDeviceFallbackAvailable() ? .ready : .serverUnavailable
+            if modelConfiguration.mode == .onDevice {
+                if case GemmaServiceError.aiEdgeRuntimeUnavailable = error {
+                    modelReadiness = .appleIntelligenceNotEnabled
+                } else if case GemmaServiceError.modelFileMissing(let model) = error {
+                    modelReadiness = .modelMissing(model)
+                } else {
+                    modelReadiness = .deviceNotEligible
+                }
+            } else {
+                modelReadiness = .serverUnavailable
+            }
         }
     }
 
@@ -427,62 +413,23 @@ final class TutorEngine: ObservableObject {
             )
             return response
         } catch {
-            guard modelConfiguration.mode == .localServer,
-                  let fallbackService = Self.makeOnDeviceFallbackService()
-            else {
-                conversationStore.saveModelRun(
-                    taskType: taskType,
-                    modelName: gemmaService.modelName,
-                    promptVersion: promptVersion,
-                    inputChars: inputChars,
-                    outputChars: 0,
-                    success: false,
-                    latencyMS: latencyMS(),
-                    error: error.localizedDescription,
-                    metadata: metadata
-                )
-                throw error
-            }
-
-            do {
-                _ = try await fallbackService.isModelInstalled()
-                let response = try await fallbackService.reply(to: messages, timeout: timeout)
-                conversationStore.saveModelRun(
-                    taskType: taskType,
-                    modelName: fallbackService.modelName,
-                    promptVersion: promptVersion,
-                    inputChars: inputChars,
-                    outputChars: response.count,
-                    success: true,
-                    latencyMS: latencyMS(),
-                    metadata: metadata
-                )
-                return response
-            } catch {
-                conversationStore.saveModelRun(
-                    taskType: taskType,
-                    modelName: fallbackService.modelName,
-                    promptVersion: promptVersion,
-                    inputChars: inputChars,
-                    outputChars: 0,
-                    success: false,
-                    latencyMS: latencyMS(),
-                    error: error.localizedDescription,
-                    metadata: metadata
-                )
-                throw error
-            }
+            conversationStore.saveModelRun(
+                taskType: taskType,
+                modelName: gemmaService.modelName,
+                promptVersion: promptVersion,
+                inputChars: inputChars,
+                outputChars: 0,
+                success: false,
+                latencyMS: latencyMS(),
+                error: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
         }
     }
 
     private func isOnDeviceFallbackAvailable() async -> Bool {
-        guard modelConfiguration.mode == .localServer,
-              let fallbackService = Self.makeOnDeviceFallbackService()
-        else {
-            return false
-        }
-
-        return (try? await fallbackService.isModelInstalled()) == true
+        false
     }
 
     @discardableResult
@@ -509,8 +456,8 @@ final class TutorEngine: ObservableObject {
         } catch {
             await refreshModelReadiness()
             let message = modelConfiguration.mode == .onDevice
-                ? "Something went wrong with the on-device model. Check that Apple Intelligence is enabled in Settings."
-                : "I could not reach the AI server. Make sure Ollama is running and the model is installed."
+                ? "Something went wrong with the on-device Gemma runtime. Check that the bundled model is installed."
+                : "I could not reach Gemma. Make sure Ollama is running and the model is installed."
             lastError = error.localizedDescription
             appendTurn(TutorTurn(speaker: .waves, text: message, createdAt: .now))
             isResponding = false
@@ -791,7 +738,7 @@ final class TutorEngine: ObservableObject {
                 GemmaMessage(
                     role: "system",
                     content: """
-                    You summarize student notes for Accordian.
+                    You summarize student notes for QuizLoop.ai.
                     Use only the provided note text.
                     The note text may include copied web page menus, citations, references, or footer text; ignore that page chrome.
                     Return exactly 2 short, complete sentences.
@@ -864,8 +811,9 @@ final class TutorEngine: ObservableObject {
                 sourceID: source.id
             )
             let finalDeduplicatedQuestions = deduplicatedQuizQuestions(finalQuestions)
+            let minimumUsableQuestions = min(bankPlan.minimumQuestions, minimumFreshQuizCount)
 
-            guard finalSegments.isEmpty == false, finalDeduplicatedQuestions.count >= bankPlan.minimumQuestions else {
+            guard finalDeduplicatedQuestions.count >= minimumUsableQuestions else {
                 throw LearningExtractionError.insufficientQuestionBank
             }
 
@@ -982,7 +930,7 @@ final class TutorEngine: ObservableObject {
             )
             let firstQuizQuestions = try await requestMultipleChoiceRescueQuestions(
                 for: source,
-                noteText: visibleText,
+                noteText: String(visibleText.prefix(1_800)),
                 targetCount: minimumFreshQuizCount
             )
             combinedQuestions.append(contentsOf: firstQuizQuestions)
@@ -997,6 +945,9 @@ final class TutorEngine: ObservableObject {
                 savedCount: combinedQuestions.count,
                 targetCount: plan.minimumQuestions
             )
+            if combinedQuestions.count >= minimumFreshQuizCount {
+                return (combinedTopics, combinedSegments, combinedQuestions)
+            }
         } catch {
             // Continue with richer extraction; the note only fails if no model questions can be saved.
         }
@@ -1174,12 +1125,12 @@ final class TutorEngine: ObservableObject {
         targetCount: Int
     ) async throws -> [LearningQuestion] {
         let clampedTarget = min(max(targetCount, 1), 8)
-        let response = try await withTimeout(seconds: 90) {
+        let response = try await withTimeout(seconds: 25) {
             try await self.modelReply(to: [
                 GemmaMessage(
                     role: "system",
                     content: """
-                    You create clean multiple-choice quiz questions for Accordian.
+                    You create clean multiple-choice quiz questions for QuizLoop.ai.
                     Return valid JSON only. Use only the supplied note text.
                     """
                 ),
@@ -1195,18 +1146,20 @@ final class TutorEngine: ObservableObject {
                     - choices must contain exactly 4 plausible choices.
                     - answer must exactly match one choice.
                     - Avoid duplicate prompts and avoid testing the same fact repeatedly.
-                    - Cover different parts of the note: identity, early life, draft, Cavaliers, Heat, Cleveland return, Lakers, playing style, national team, and legacy when supported.
+                    - Cover different important ideas from the supplied note.
+                    - Prefer concrete source-grounded facts, relationships, formulas, causes, examples, and definitions.
+                    - Do not ask meta questions about the note, the student's goals, or what the student wants to practice.
                     - Do not use "all of the above", "none of the above", "not mentioned", or joke answers.
 
                     JSON shape:
-                    {"questions":[{"topic_title":"LeBron James","subtopic_title":"Career overview","assessment_angle":"definition","type":"multipleChoice","prompt":"Question?","answer":"Correct answer","choices":["Correct answer","Wrong but plausible","Wrong but plausible","Wrong but plausible"],"importance":0.8,"difficulty":0.6}]}
+                    {"questions":[{"topic_title":"\(source.title)","subtopic_title":"Core idea","assessment_angle":"definition","type":"multipleChoice","prompt":"Question?","answer":"Correct answer","choices":["Correct answer","Wrong but plausible","Wrong but plausible","Wrong but plausible"],"importance":0.8,"difficulty":0.6}]}
 
                     Note title: \(source.title)
                     Note text:
                     \(noteText)
                     """
                 )
-            ], timeout: 90, taskType: "quiz_generation", promptVersion: "multiple_choice_rescue.v1")
+            ], timeout: 25, taskType: "quiz_generation", promptVersion: "multiple_choice_rescue.v2")
         }
 
         let expansion = try parseFreshQuestionExpansion(from: response)
@@ -3192,7 +3145,7 @@ final class TutorEngine: ObservableObject {
                     GemmaMessage(
                         role: "system",
                         content: """
-                        You create fresh quiz questions for Accordian.
+                        You create fresh quiz questions for QuizLoop.ai.
                         Return valid JSON only. Do not include markdown, prose, comments, or code fences.
                         Use only the supplied note text.
                         """
@@ -4002,7 +3955,7 @@ final class TutorEngine: ObservableObject {
                 GemmaMessage(
                     role: "system",
                     content: """
-                    You are Accordian's bounded answer grader.
+                    You are QuizLoop.ai's bounded answer grader.
                     Grade only against the expected answer from saved notes.
                     Return valid JSON only with keys score, reason, matched_ideas, missing_ideas, and feedback.
                     score must be a number from 0 to 1.
@@ -5446,22 +5399,12 @@ final class TutorEngine: ObservableObject {
         case .localServer:
             return OllamaGemmaService(configuration: configuration)
         case .onDevice:
-            #if canImport(FoundationModels)
-            if #available(iOS 26, *) {
-                return OnDeviceModelService()
-            }
-            #endif
-            return OnDeviceGemmaServicePlaceholder(model: configuration.modelName)
+            return GoogleAIEdgeGemmaService(modelFileName: configuration.modelName)
         }
     }
 
     private static func makeOnDeviceFallbackService() -> GemmaService? {
-        #if canImport(FoundationModels)
-        if #available(iOS 26, *) {
-            return OnDeviceModelService()
-        }
-        #endif
-        return nil
+        GoogleAIEdgeGemmaService(modelFileName: ModelRuntimeConfiguration.default.modelName)
     }
 
     private func parseTopics(from response: String, sourceID: UUID) -> [LearningTopic] {
@@ -5493,7 +5436,7 @@ final class TutorEngine: ObservableObject {
 
     private var learningParserSystemPrompt: String {
         """
-        You are Accordian's learning parser.
+        You are QuizLoop.ai's learning parser.
         Return valid JSON only. Do not include markdown, prose, comments, or code fences.
         Use only the supplied notes.
         Extract a complete learning map for a student.
@@ -6136,7 +6079,6 @@ final class TutorEngine: ObservableObject {
         guard prompt.isEmpty == false, answer.isEmpty == false else { return false }
         guard isMetaSourceQuestion(prompt) == false else { return false }
         guard isHighQualityQuizPrompt(prompt: prompt, answer: answer, type: question.type) else { return false }
-        guard questionConceptMatchesSubtopic(question) else { return false }
         guard promptDoesNotRevealAnswer(prompt: prompt, answer: answer) else { return false }
         guard hasUsableExpectedAnswer(answer, for: question.type) else { return false }
         guard hasUsableGradingKey(question) else { return false }
@@ -6409,7 +6351,7 @@ final class TutorEngine: ObservableObject {
             guard tokens.isEmpty == false else { return false }
             let overlap = Double(answerTokens.intersection(tokens).count)
                 / Double(max(answerTokens.count, tokens.count))
-            return overlap >= 0.62
+            return overlap >= 0.8
         }
     }
 
@@ -6579,7 +6521,7 @@ final class TutorEngine: ObservableObject {
         let cleanText = text
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let answer = cleanText.isEmpty ? "Review this answer in Accordian." : cleanText
+        let answer = cleanText.isEmpty ? "Review this answer in QuizLoop.ai." : cleanText
 
         return [
             StudyFlashcard(

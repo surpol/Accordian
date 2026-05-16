@@ -42,7 +42,7 @@ struct LocalStatusCard: View {
                 Spacer(minLength: 0)
             }
 
-            Text("Accordian answers from your notes first, then uses Gemma to explain.")
+            Text("QuizLoop.ai answers from your notes first, then uses Gemma to explain.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineSpacing(2)
@@ -277,28 +277,28 @@ extension ModelReadiness {
         case .deviceNotEligible:
             "Device not eligible"
         case .appleIntelligenceNotEnabled:
-            "Apple Intelligence off"
+            "AI Edge not linked"
         case .appleModelNotReady:
-            "Model preparing"
+            "Gemma preparing"
         }
     }
 
     var detail: String {
         switch self {
         case .checking:
-            "Accordian is checking the selected model runtime."
+            "QuizLoop.ai is checking the selected model runtime."
         case .ready:
-            "This is the model Accordian is currently using."
+            "This is the model QuizLoop.ai is currently using."
         case .serverUnavailable:
-            "Accordian cannot reach the configured local model server."
+            "QuizLoop.ai cannot reach the configured Gemma endpoint."
         case .modelMissing(let model):
             "The server is reachable, but \(model) is not installed."
         case .deviceNotEligible:
             "This device cannot run the selected on-device model runtime."
         case .appleIntelligenceNotEnabled:
-            "Turn on Apple Intelligence in Settings to use on-device mode."
+            "This build does not include Google AI Edge / MediaPipe yet."
         case .appleModelNotReady:
-            "The on-device model is still preparing."
+            "The on-device Gemma runtime is still preparing."
         }
     }
 
