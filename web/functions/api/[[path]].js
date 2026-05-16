@@ -453,30 +453,80 @@ async function focusOptions(db, noteId) {
 }
 
 async function searchWikipedia(query) {
-  const url = new URL("https://en.wikipedia.org/w/api.php");
-  url.search = new URLSearchParams({
+  const payload = await wikipediaJSON({
     action: "query",
     list: "search",
     srsearch: query,
-    format: "json",
-    origin: "*"
-  }).toString();
-  const payload = await fetch(url).then((response) => response.json());
-  return (payload.query?.search || []).slice(0, 6).map((item) => ({
-    title: item.title,
-    snippet: String(item.snippet || "").replace(/<[^>]+>/g, "")
-  }));
+    srlimit: "6",
+    srprop: "snippet"
+  });
+  return (payload.query?.search || [])
+    .filter(isUsefulWikipediaResult)
+    .slice(0, 6)
+    .map((item) => ({
+      title: item.title,
+      snippet: decodeHTML(String(item.snippet || "").replace(/<[^>]+>/g, ""))
+    }));
+}
+
+function isUsefulWikipediaResult(item) {
+  const text = `${item.title || ""} ${item.snippet || ""}`.toLowerCase();
+  const blocked = [" sex", "porn", "erotic", "sexual"];
+  return !blocked.some((term) => text.includes(term));
+}
+
+function decodeHTML(value) {
+  return String(value)
+    .replace(/&quot;/g, "\"")
+    .replace(/&#039;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
 }
 
 async function wikipediaArticle(title) {
   const cleanTitle = String(title || "").trim();
   if (!cleanTitle) throw new Error("Wikipedia title is required.");
-  const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTitle)}`;
-  const payload = await fetch(url, { headers: { accept: "application/json" } }).then((response) => response.json());
+  const payload = await wikipediaJSON({
+    action: "query",
+    prop: "extracts",
+    exintro: "0",
+    explaintext: "1",
+    redirects: "1",
+    titles: cleanTitle
+  });
+  const page = payload.query?.pages?.find((candidate) => candidate.missing !== true);
+  if (!page?.extract) throw new Error("Wikipedia article text was not available.");
   return {
-    title: payload.title || cleanTitle,
-    text: payload.extract || ""
+    title: page.title || cleanTitle,
+    text: String(page.extract || "").replace(/\n{3,}/g, "\n\n").trim()
   };
+}
+
+async function wikipediaJSON(params) {
+  const url = new URL("https://en.wikipedia.org/w/api.php");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("formatversion", "2");
+  url.searchParams.set("origin", "*");
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "Accordian.ai/1.0 (https://accordian-bgp.pages.dev; Kaggle Gemma 4 Good demo)"
+    }
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Wikipedia request failed: ${response.status}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("Wikipedia returned an unreadable response. Please try a more specific search.");
+  }
 }
 
 async function summarizeNote(env, title, body) {
