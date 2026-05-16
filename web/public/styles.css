@@ -234,16 +234,16 @@ h3 {
 }
 
 .quiz-active .quiz-area {
-  min-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px);
+  min-height: auto;
 }
 
 .quiz-active .question-card {
   background: var(--card);
   border-radius: 0;
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  min-height: calc(100vh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 28px);
-  padding: 8px 2px 0;
+  grid-template-rows: auto auto auto auto auto;
+  min-height: auto;
+  padding: 8px 2px calc(14px + env(safe-area-inset-bottom));
 }
 
 .learn-grid,
@@ -358,15 +358,49 @@ h3 {
   z-index: 20;
 }
 
-.journey-switcher {
+.study-controls {
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 22px;
   display: grid;
-  gap: 8px;
+  gap: 1px;
+  overflow: hidden;
 }
 
-.journey-switcher label {
+.journey-switcher,
+.focus-switcher {
+  background: transparent;
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+}
+
+.journey-switcher label,
+.focus-switcher label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.focus-switcher {
+  border-top: 1px solid var(--line);
+  margin-top: 0;
+}
+
+.focus-switcher[hidden] {
+  display: none;
+}
+
+.study-controls select {
+  background-color: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 16px;
+  min-height: 28px;
+  padding: 0 28px 0 0;
 }
 
 .notes-list,
@@ -653,7 +687,8 @@ h3 {
   color: #a33a2d;
 }
 
-.prep-line {
+.prep-line,
+.grading-state {
   align-items: flex-start;
   background: #e8f0fe;
   border: 1px solid #aecbfa;
@@ -664,18 +699,73 @@ h3 {
   padding: 12px;
 }
 
-.prep-line strong {
+.prep-line strong,
+.grading-state strong {
   display: block;
   font-size: 14px;
   line-height: 1.2;
 }
 
-.prep-line p {
+.prep-line > div,
+.grading-state > div {
+  min-width: 0;
+  width: 100%;
+}
+
+.prep-line p,
+.grading-state p {
   color: #3c4043;
   font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
   margin-top: 3px;
+}
+
+.grading-state {
+  background: var(--soft);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.prep-progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.prep-progress > div:first-child {
+  align-items: baseline;
+  display: flex;
+  gap: 6px;
+}
+
+.prep-progress > div:first-child span:first-child {
+  color: var(--blue-dark);
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.prep-progress > div:first-child span:last-child {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.prep-progress-track {
+  background: rgba(26, 115, 232, 0.14);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.prep-progress-track span {
+  background: linear-gradient(90deg, var(--blue), var(--green));
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  transition: width 300ms ease;
 }
 
 .question-card,
@@ -895,7 +985,7 @@ h3 {
 .source-chooser {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .source-chooser[hidden] {
@@ -932,7 +1022,8 @@ h3 {
   line-height: 1.2;
 }
 
-.math-box {
+.math-box,
+.book-box {
   background: #fef7e0;
   border: 1px solid #fdd663;
   border-radius: 18px;
@@ -941,29 +1032,43 @@ h3 {
   padding: 12px;
 }
 
-.math-box[hidden] {
+.book-box {
+  background: #e6f4ea;
+  border-color: #a8dab5;
+}
+
+.math-box[hidden],
+.book-box[hidden] {
   display: none;
 }
 
-.math-box strong {
+.math-box strong,
+.book-box strong {
   color: #8a5a00;
   font-size: 13px;
 }
 
-.math-box p {
+.book-box strong {
+  color: var(--green);
+}
+
+.math-box p,
+.book-box p {
   color: #3c4043;
   font-size: 13px;
   font-weight: 650;
   line-height: 1.35;
 }
 
-.math-template-grid {
+.math-template-grid,
+.book-template-grid {
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.math-template-card {
+.math-template-card,
+.book-template-card {
   background: var(--bg);
   border: 1px solid #fdd663;
   border-radius: 14px;
@@ -976,12 +1081,18 @@ h3 {
   width: 100%;
 }
 
-.math-template-card span {
+.book-template-card {
+  border-color: #a8dab5;
+}
+
+.math-template-card span,
+.book-template-card span {
   font-size: 14px;
   font-weight: 850;
 }
 
-.math-template-card small {
+.math-template-card small,
+.book-template-card small {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -1180,8 +1291,8 @@ dd {
 
 @media (max-width: 420px) {
   .shell {
-    padding-left: 10px;
-    padding-right: 10px;
+    padding-left: 14px;
+    padding-right: 14px;
   }
 
   .panel {
@@ -1199,32 +1310,76 @@ dd {
 }
 
 @media (max-width: 759px) {
+  .shell {
+    padding-top: calc(8px + env(safe-area-inset-top));
+  }
+
   .home-card {
     background: transparent;
     border: 0;
     border-radius: 0;
-    min-height: calc(100vh - 250px - env(safe-area-inset-bottom));
     align-content: start;
     box-shadow: none;
-    padding: 4px 0 0;
+    gap: 12px;
+    min-height: 0;
+    padding: 0;
   }
 
   .home-copy h2 {
-    font-size: 32px;
-    line-height: 1.05;
+    font-size: 27px;
+    line-height: 1.08;
+    max-width: 12ch;
+  }
+
+  .home-copy .muted {
+    display: -webkit-box;
+    font-size: 14px;
+    line-height: 1.42;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
   }
 
   .home-progress {
     background: transparent;
     border-top: 1px solid var(--line);
     border-radius: 0;
-    padding: 18px 0 0;
+    display: flex;
+    align-items: end;
+    gap: 14px;
+    padding: 12px 0 0;
+  }
+
+  .home-progress > div > span {
+    font-size: 36px;
+  }
+
+  .home-progress > .muted {
+    font-size: 13px;
+    line-height: 1.15;
+    margin: 0 0 6px;
+    white-space: nowrap;
   }
 
   .app-header {
     align-items: center;
     display: flex;
     justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .brand-lockup {
+    gap: 8px;
+  }
+
+  .app-logo {
+    border-radius: 10px;
+    height: 34px;
+    width: 34px;
+  }
+
+  h1 {
+    font-size: 30px;
   }
 
   .subtitle {
@@ -1232,7 +1387,37 @@ dd {
   }
 
   .status {
-    max-width: 34vw;
+    font-size: 9px;
+    max-width: 24vw;
+    padding: 4px 7px;
+  }
+
+  .study-controls {
+    border-radius: 20px;
+  }
+
+  .journey-switcher,
+  .focus-switcher {
+    gap: 4px;
+    padding: 11px 12px;
+  }
+
+  .journey-switcher label,
+  .focus-switcher label {
+    font-size: 10px;
+  }
+
+  .study-controls select {
+    font-size: 14px;
+    min-height: 28px;
+  }
+
+  .actions {
+    margin: 2px 0 0;
+  }
+
+  .actions button {
+    min-height: 54px;
   }
 
   .status-banner {
@@ -1320,6 +1505,39 @@ dd {
     border: 0;
     border-radius: 0;
     padding: 4px 0 0;
+  }
+
+  .quiz-active .shell {
+    padding: calc(10px + env(safe-area-inset-top)) 16px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .quiz-active .question-card {
+    padding-top: 4px;
+  }
+
+  .quiz-active .prompt {
+    font-size: clamp(24px, 7vw, 32px);
+    margin: 8px 0 18px;
+  }
+
+  .quiz-active .choices {
+    gap: 10px;
+    padding-bottom: 8px;
+  }
+
+  .quiz-active .choice {
+    min-height: 58px;
+    padding: 14px 16px;
+  }
+
+  .quiz-nav {
+    background: var(--bg);
+    margin: 6px -2px 0;
+    padding-top: 8px;
+  }
+
+  .quiz-nav .muted {
+    display: none;
   }
 }
 

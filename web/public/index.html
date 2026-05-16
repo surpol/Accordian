@@ -11,7 +11,7 @@
     <title>Accordian</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=65" />
+    <link rel="stylesheet" href="/styles.css?v=78" />
   </head>
   <body>
     <main class="shell">
@@ -23,7 +23,6 @@
             <p class="subtitle">Learn one note at a time.</p>
           </div>
         </div>
-        <div class="status" id="modelStatus">Gemma 4</div>
       </header>
 
       <nav class="tabbar" aria-label="Main navigation">
@@ -36,10 +35,19 @@
         <div class="learn-grid">
           <section class="panel main-panel focus-panel">
             <div class="home-card">
-              <div class="journey-switcher">
-                <label for="journeySelect">Current note</label>
-                <select id="journeySelect" aria-label="Choose journey"></select>
-                <button class="compat-hidden" id="refreshButton" type="button" aria-hidden="true" tabindex="-1">Refresh</button>
+              <div class="study-controls">
+                <div class="journey-switcher">
+                  <label for="journeySelect">Note</label>
+                  <select id="journeySelect" aria-label="Choose journey"></select>
+                  <button class="compat-hidden" id="refreshButton" type="button" aria-hidden="true" tabindex="-1">Refresh</button>
+                </div>
+
+                <div class="focus-switcher" id="focusSwitcher" hidden>
+                  <label for="quizFocusSelect">Focus</label>
+                  <select id="quizFocusSelect" aria-label="Choose quiz focus">
+                    <option value="">Any focus</option>
+                  </select>
+                </div>
               </div>
 
               <div class="home-copy">
@@ -60,7 +68,7 @@
                   <span id="understandingScore">0%</span>
                   <p>understood</p>
                 </div>
-                <p class="muted"><span id="attemptCount">0</span> <span id="attemptLabel">checks completed</span></p>
+                <p class="muted"><span id="attemptCount">0</span> <span id="attemptLabel">answered</span></p>
               </div>
 
               <div class="actions">
@@ -128,6 +136,40 @@
                   <span>Math</span>
                   <small>Problems + rules</small>
                 </button>
+                <button type="button" class="source-option" data-source-mode="books">
+                  <span>Books</span>
+                  <small>Chapters + themes</small>
+                </button>
+              </section>
+              <section class="book-box" id="bookBox" hidden>
+                <strong>Books become study sections.</strong>
+                <p>Paste a chapter, passage, or full public-domain book. Accordian splits long text before making quizzes.</p>
+                <div class="book-template-grid">
+                  <button type="button" class="book-template-card" data-book-template="blank">
+                    <span>Custom</span>
+                    <small>Paste any excerpt</small>
+                  </button>
+                  <button type="button" class="book-template-card" data-book-template="whole-book">
+                    <span>Full Book</span>
+                    <small>Auto-split sections</small>
+                  </button>
+                  <button type="button" class="book-template-card" data-book-template="chapter">
+                    <span>Chapter</span>
+                    <small>Events, ideas, questions</small>
+                  </button>
+                  <button type="button" class="book-template-card" data-book-template="character-theme">
+                    <span>Literature</span>
+                    <small>Characters + themes</small>
+                  </button>
+                  <button type="button" class="book-template-card" data-book-template="nonfiction">
+                    <span>Nonfiction</span>
+                    <small>Claim, evidence, argument</small>
+                  </button>
+                  <button type="button" class="book-template-card" data-book-template="primary-source">
+                    <span>Primary Source</span>
+                    <small>Context + meaning</small>
+                  </button>
+                </div>
               </section>
               <section class="math-box" id="mathBox" hidden>
                 <strong>Math works best with structure.</strong>
@@ -172,7 +214,6 @@
             <details class="wiki-box" aria-label="Wikipedia import">
               <summary>
                 <span>Wikipedia</span>
-                <small>Search</small>
               </summary>
               <div class="wiki-search">
                 <input id="wikiQuery" placeholder="Search Wikipedia" />
@@ -205,6 +246,6 @@
         </div>
       </section>
     </main>
-    <script src="/app.js?v=65" type="module"></script>
+    <script src="/app.js?v=78" type="module"></script>
   </body>
 </html>

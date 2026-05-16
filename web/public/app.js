@@ -17,6 +17,8 @@ const state = {
   quiz: Array.isArray(storedState.quiz) ? storedState.quiz : [],
   quizNoteId: storedState.quizNoteId || storedState.activeNoteId || null,
   quizStartedAt: Number(storedState.quizStartedAt || 0),
+  quizFocusByNote: storedState.quizFocusByNote || {},
+  focusOptionsByNote: {},
   answers: new Map(Object.entries(storedState.answers || {})),
   index: Number(storedState.index || 0),
   sessions: [],
@@ -26,6 +28,8 @@ const state = {
   noteSourceMode: storedState.noteSourceMode || "text",
   mathTemplateApplied: Boolean(storedState.mathTemplateApplied),
   mathTemplateKey: storedState.mathTemplateKey || "blank",
+  bookTemplateApplied: Boolean(storedState.bookTemplateApplied),
+  bookTemplateKey: storedState.bookTemplateKey || "blank",
   editorMode: storedState.editorMode || "edit",
   editingNoteId: storedState.editingNoteId || null,
   libraryMode: storedState.libraryMode || "list",
@@ -44,12 +48,15 @@ function saveLocalState() {
     quiz: state.quiz,
     quizNoteId: state.quizNoteId,
     quizStartedAt: state.quizStartedAt,
+    quizFocusByNote: state.quizFocusByNote,
     answers: Object.fromEntries(state.answers),
     index: state.index,
     noteDraft: state.noteDraft,
     noteSourceMode: state.noteSourceMode,
     mathTemplateApplied: state.mathTemplateApplied,
     mathTemplateKey: state.mathTemplateKey,
+    bookTemplateApplied: state.bookTemplateApplied,
+    bookTemplateKey: state.bookTemplateKey,
     editorMode: state.editorMode,
     editingNoteId: state.editingNoteId,
     libraryMode: state.libraryMode,
@@ -98,6 +105,30 @@ function prepElapsedText() {
   return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+function prepProgressPercent(note = activeNote()) {
+  const startedAt = Number(state.prepState?.startedAt || 0);
+  if (!startedAt) return 8;
+  const seconds = Math.max(0, (Date.now() - startedAt) / 1000);
+  const expectedSeconds = Number(note?.questionCount || 0) > 0 ? 45 : 75;
+  const eased = 1 - Math.exp(-seconds / Math.max(8, expectedSeconds / 3));
+  return Math.max(8, Math.min(94, Math.round(8 + eased * 86)));
+}
+
+function prepProgressHTML(note = activeNote()) {
+  const progress = prepProgressPercent(note);
+  return `
+    <div class="prep-progress" aria-label="Quiz preparation progress">
+      <div>
+        <span>${progress}%</span>
+        <span>estimated</span>
+      </div>
+      <div class="prep-progress-track" aria-hidden="true">
+        <span style="width: ${progress}%"></span>
+      </div>
+    </div>
+  `;
+}
+
 function quizSkeletonHTML(title, detail = "") {
   return `
     <div class="skeleton-card" aria-busy="true">
@@ -128,6 +159,19 @@ function compactPrepHTML(title, detail = "") {
       <div>
         <strong>${escapeHTML(title)}</strong>
         ${detail ? `<p>${escapeHTML(detail)}</p>` : ""}
+        ${prepProgressHTML()}
+      </div>
+    </div>
+  `;
+}
+
+function gradingStateHTML() {
+  return `
+    <div class="grading-state" aria-busy="true">
+      <span class="status-dot" aria-hidden="true"></span>
+      <div>
+        <strong>Grading quiz</strong>
+        <p>Saving your answers and preparing your review.</p>
       </div>
     </div>
   `;
@@ -231,6 +275,7 @@ function selectNote(noteId) {
   }
   populateNoteEditor();
   render();
+  loadFocusOptions(noteId);
   logAction("ui.note.selected", { noteId, objectType: "note", objectId: noteId });
 }
 
@@ -241,6 +286,8 @@ function deselectNote(noteId) {
   state.noteDraft = { title: "", body: "" };
   state.noteSourceMode = "text";
   state.wikiResults = [];
+  state.bookTemplateApplied = false;
+  state.bookTemplateKey = "blank";
   populateNoteEditor();
   renderWikiResults();
   renderNotes();
@@ -267,6 +314,51 @@ function renderJourneySelect() {
   select.value = activeNote()?.id || state.notes[0]?.id || "";
 }
 
+function renderFocusSelect() {
+  const wrapper = $("focusSwitcher");
+  const select = $("quizFocusSelect");
+  const note = activeNote();
+  if (!wrapper || !select || !note) return;
+  const options = state.focusOptionsByNote[note.id] || [];
+  wrapper.hidden = false;
+  select.disabled = options.length === 0;
+  if (options.length === 0) {
+    const label = note.status === "building" || Number(note.questionCount || 0) === 0
+      ? "Building focus areas"
+      : "Any focus";
+    select.innerHTML = `<option value="">${escapeHTML(label)}</option>`;
+    state.quizFocusByNote[note.id] = "";
+    return;
+  }
+  select.innerHTML = `<option value="">Any focus</option>` + options.map((option) => {
+    const label = option.type === "topic"
+      ? `Topic: ${option.topic}`
+      : option.topic === option.subtopic
+        ? option.topic
+        : `${option.topic}: ${option.subtopic}`;
+    return `<option value="${escapeHTML(option.value)}">${escapeHTML(label)}</option>`;
+  }).join("");
+  const savedFocus = state.quizFocusByNote[note.id] || "";
+  if (options.some((option) => option.value === savedFocus)) {
+    select.value = savedFocus;
+  } else {
+    state.quizFocusByNote[note.id] = "";
+    select.value = "";
+  }
+}
+
+async function loadFocusOptions(noteId = activeNote()?.id) {
+  if (!noteId) return;
+  try {
+    const payload = await api(`/api/notes/${encodeURIComponent(noteId)}/focus-options`);
+    state.focusOptionsByNote[noteId] = payload.options || [];
+    renderFocusSelect();
+  } catch {
+    state.focusOptionsByNote[noteId] = [];
+    renderFocusSelect();
+  }
+}
+
 function populateNoteEditor() {
   const note = state.editorMode === "new"
     ? null
@@ -289,6 +381,7 @@ function populateNoteEditor() {
   if ($("noteMenu")) $("noteMenu").hidden = false;
   if ($("sourceChooser")) $("sourceChooser").hidden = true;
   if ($("mathBox")) $("mathBox").hidden = true;
+  if ($("bookBox")) $("bookBox").hidden = true;
   $("noteSummaryBox").hidden = false;
   $("noteSummaryText").textContent = note.summary || (note.status === "building"
     ? "Gemma is reading this note now."
@@ -309,6 +402,8 @@ function clearNoteEditor() {
   state.noteSourceMode = "text";
   state.mathTemplateApplied = false;
   state.mathTemplateKey = "blank";
+  state.bookTemplateApplied = false;
+  state.bookTemplateKey = "blank";
   state.wikiResults = [];
   populateNoteEditor();
   renderWikiResults();
@@ -334,6 +429,11 @@ function updateSourceModeUI() {
       subtitle: "Describe the concept, rules, examples, and practice goal.",
       title: "Math topic",
       body: "Add formulas, worked examples, and what feels confusing"
+    },
+    books: {
+      subtitle: "Paste a chapter, passage, or full public-domain book.",
+      title: "Book or chapter title",
+      body: "Paste book text here. Long books will be split into study sections."
     }
   }[mode];
 
@@ -341,6 +441,7 @@ function updateSourceModeUI() {
   if ($("noteTitle")) $("noteTitle").placeholder = copy.title;
   if ($("noteBody")) $("noteBody").placeholder = copy.body;
   if ($("mathBox")) $("mathBox").hidden = mode !== "math";
+  if ($("bookBox")) $("bookBox").hidden = mode !== "books";
   if ($("manualNoteFields")) $("manualNoteFields").hidden = mode === "wikipedia";
   if ($("saveNoteButton")) $("saveNoteButton").hidden = mode === "wikipedia";
 
@@ -359,6 +460,9 @@ function updateSourceModeUI() {
 function setSourceMode(mode) {
   if (state.noteSourceMode === "math" && mode !== "math") {
     clearMathTemplateIfUnchanged();
+  }
+  if (state.noteSourceMode === "books" && mode !== "books") {
+    clearBookTemplateIfUnchanged();
   }
   state.noteSourceMode = mode;
   updateSourceModeUI();
@@ -704,6 +808,216 @@ function applyMathTemplate({ replace = false } = {}) {
   saveLocalState();
 }
 
+function bookTemplateTitle() {
+  return bookTemplateTitleFor(state.bookTemplateKey || "blank");
+}
+
+function bookTemplateBody() {
+  return bookTemplateBodyFor(state.bookTemplateKey || "blank");
+}
+
+function bookTemplateTitleFor(key) {
+  const titles = {
+    "whole-book": "Full Book Study",
+    chapter: "Book Chapter Notes",
+    "character-theme": "Literature Character and Theme Study",
+    nonfiction: "Nonfiction Argument Study",
+    "primary-source": "Primary Source Reading"
+  };
+  return titles[key] || "Book notes";
+}
+
+function bookTemplateBodyFor(key) {
+  if (key === "whole-book") {
+    return [
+      "## Book Reading: Full Book Study",
+      "",
+      "### Book:",
+      "",
+      "### Author:",
+      "",
+      "### Source text:",
+      "",
+      "Paste the full book text here. Accordian will split it into study sections automatically.",
+      "",
+      "### Study goal:",
+      "",
+      "- Understand the main ideas across the full book",
+      "- Build chapter-by-chapter recall",
+      "- Connect characters, events, claims, evidence, or themes",
+      "- Quiz progressively instead of all at once"
+    ].join("\n");
+  }
+
+  if (key === "chapter") {
+    return [
+      "## Book Reading: Chapter Notes",
+      "",
+      "### Book:",
+      "",
+      "### Chapter or passage:",
+      "",
+      "### Source text:",
+      "",
+      "Paste the chapter excerpt or reading notes here.",
+      "",
+      "### Key events or ideas:",
+      "",
+      "-",
+      "",
+      "### Important quotes or evidence:",
+      "",
+      "-",
+      "",
+      "### What I want to understand:",
+      "",
+      "- What happened?",
+      "- Why did it matter?",
+      "- How does this connect to the larger book?"
+    ].join("\n");
+  }
+
+  if (key === "character-theme") {
+    return [
+      "## Book Reading: Character and Theme Study",
+      "",
+      "### Book:",
+      "",
+      "### Characters:",
+      "",
+      "-",
+      "",
+      "### Themes:",
+      "",
+      "-",
+      "",
+      "### Source text:",
+      "",
+      "Paste the passage or scene here.",
+      "",
+      "### Evidence:",
+      "",
+      "- Quote or moment:",
+      "- What it reveals:",
+      "",
+      "### What I want to understand:",
+      "",
+      "- Character motivation",
+      "- Theme development",
+      "- Symbolism or conflict"
+    ].join("\n");
+  }
+
+  if (key === "nonfiction") {
+    return [
+      "## Book Reading: Nonfiction Argument Study",
+      "",
+      "### Book or essay:",
+      "",
+      "### Main claim:",
+      "",
+      "### Source text:",
+      "",
+      "Paste the excerpt here.",
+      "",
+      "### Evidence used by the author:",
+      "",
+      "-",
+      "",
+      "### Important terms:",
+      "",
+      "-",
+      "",
+      "### What I want to understand:",
+      "",
+      "- The author's claim",
+      "- The evidence supporting it",
+      "- Assumptions, counterarguments, and implications"
+    ].join("\n");
+  }
+
+  if (key === "primary-source") {
+    return [
+      "## Book Reading: Primary Source Study",
+      "",
+      "### Source:",
+      "",
+      "### Historical or cultural context:",
+      "",
+      "### Source text:",
+      "",
+      "Paste the primary-source passage here.",
+      "",
+      "### Key claims or observations:",
+      "",
+      "-",
+      "",
+      "### Important vocabulary:",
+      "",
+      "-",
+      "",
+      "### What I want to understand:",
+      "",
+      "- What the source says",
+      "- Why it was written",
+      "- What evidence it gives about its time period"
+    ].join("\n");
+  }
+
+  return [
+    "## Book Reading:",
+    "",
+    "### Book or source:",
+    "",
+    "### Passage or chapter:",
+    "",
+    "### Source text:",
+    "",
+    "Paste a focused excerpt here.",
+    "",
+    "### What I want to understand:",
+    "",
+    "-"
+  ].join("\n");
+}
+
+function applyBookTemplateByKey(key) {
+  const previousTitle = bookTemplateTitle();
+  const previousBody = bookTemplateBody();
+  const canReplace = state.bookTemplateApplied
+    && ($("noteTitle")?.value || "") === previousTitle
+    && ($("noteBody")?.value || "") === previousBody;
+  state.bookTemplateKey = key;
+  applyBookTemplate({ replace: canReplace });
+}
+
+function clearBookTemplateIfUnchanged() {
+  if (!state.bookTemplateApplied) return;
+  if ($("noteTitle")?.value === bookTemplateTitle()) {
+    $("noteTitle").value = "";
+    state.noteDraft.title = "";
+  }
+  if ($("noteBody")?.value === bookTemplateBody()) {
+    $("noteBody").value = "";
+    state.noteDraft.body = "";
+  }
+  state.bookTemplateApplied = false;
+}
+
+function applyBookTemplate({ replace = false } = {}) {
+  if ($("noteTitle") && (replace || !$("noteTitle").value.trim())) {
+    $("noteTitle").value = bookTemplateTitle();
+    state.noteDraft.title = $("noteTitle").value;
+  }
+  if ($("noteBody") && (replace || !$("noteBody").value.trim())) {
+    $("noteBody").value = bookTemplateBody();
+    state.noteDraft.body = $("noteBody").value;
+  }
+  state.bookTemplateApplied = true;
+  $("noteBody")?.focus();
+  saveLocalState();
+}
+
 function showNotesList() {
   state.libraryMode = "list";
   state.editingNoteId = null;
@@ -745,7 +1059,11 @@ function renderNoteButtons(containerId) {
       : note.status === "building"
         ? "Reading note"
         : "Ready to build";
-    const meta = note.attemptCount === 1 ? "1 check completed" : `${note.attemptCount} checks completed`;
+    const sectionMeta = note.sourceType === "books" && Number(note.sectionCount || 0) > 1
+      ? `${note.sectionCount} sections`
+      : "";
+    const answerMeta = note.attemptCount === 1 ? "1 answered" : `${note.attemptCount} answered`;
+    const meta = [sectionMeta, answerMeta].filter(Boolean).join(" · ");
     return `
       <div class="note-row ${isActive ? "active" : ""}">
         <button class="note-card" data-note-id="${escapeHTML(note.id)}">
@@ -773,7 +1091,7 @@ function renderActiveNote() {
     $("questionCount").textContent = "No journey";
     $("noteStatusBanner").hidden = true;
     $("attemptCount").textContent = "0";
-    $("attemptLabel").textContent = "checks completed";
+    $("attemptLabel").textContent = "answered";
     $("understandingScore").textContent = "0%";
     $("startQuizButton").disabled = false;
     $("startQuizButton").textContent = "Add Notes";
@@ -787,25 +1105,29 @@ function renderActiveNote() {
   }
 
   $("startQuizButton").onclick = null;
+  renderFocusSelect();
 
   $("activeTitle").textContent = note.title;
-  $("activeSummary").textContent = note.summary || "Accordian prepares quizzes automatically from this note.";
+  $("activeSummary").textContent = note.summary || (note.sourceType === "books" && Number(note.sectionCount || 0) > 1
+    ? `Accordian split this book into ${note.sectionCount} study sections and prepares quizzes progressively.`
+    : "Accordian prepares quizzes automatically from this note.");
   $("questionCount").textContent = note.queuedQuizCount > 0
     ? "Quiz ready"
     : note.status === "building"
       ? "Preparing quiz"
       : `${note.questionCount} checks`;
   $("attemptCount").textContent = note.attemptCount;
-  $("attemptLabel").textContent = note.attemptCount === 1 ? "check completed" : "checks completed";
+  $("attemptLabel").textContent = "answered";
   $("understandingScore").textContent = percent(note.averageScore);
 
   const isReading = note.status === "building" || state.waitingForNextQuizNoteId === note.id || state.prepState?.noteId === note.id;
   $("noteStatusBanner").hidden = !isReading;
   if (isReading) {
+    const progress = prepProgressPercent(note);
     $("noteStatusTitle").textContent = note.questionCount > 0 ? "Preparing next quiz" : "Reading note";
     $("noteStatusDetail").textContent = note.questionCount > 0
-      ? "Using your history to shape fresh checks."
-      : "Turning this text into topics and quiz checks.";
+      ? `Using your history to shape fresh checks. ${progress}% estimated.`
+      : `Turning this text into topics and quiz checks. ${progress}% estimated.`;
   }
 
   const journeyComplete = state.journeyCompleteNoteId === note.id;
@@ -1119,6 +1441,7 @@ async function loadNotes() {
   }
   populateNoteEditor();
   render();
+  loadFocusOptions(activeNote()?.id);
 }
 
 async function loadSessions() {
@@ -1154,7 +1477,7 @@ async function saveNote(event) {
     const path = existingNote ? `/api/notes/${encodeURIComponent(existingNote.id)}` : "/api/notes";
     const payload = await api(path, {
       method: existingNote ? "PUT" : "POST",
-      body: JSON.stringify({ title, body })
+      body: JSON.stringify({ title, body, sourceType: state.noteSourceMode })
     });
     state.activeNoteId = payload.note.id;
     state.editorMode = "edit";
@@ -1308,12 +1631,14 @@ async function restoreBackup(file) {
 async function startQuiz() {
   const note = activeNote();
   if (!note) return;
-  logAction("ui.quiz.start_requested", { noteId: note.id, objectType: "note", objectId: note.id });
+  const focus = state.quizFocusByNote[note.id] || "";
+  logAction("ui.quiz.start_requested", { noteId: note.id, objectType: "note", objectId: note.id, focus });
   $("startQuizButton").disabled = true;
   $("startQuizButton").hidden = false;
   $("quizArea").innerHTML = quizSkeletonHTML("Opening quiz");
   try {
-    const payload = await api(`/api/notes/${encodeURIComponent(note.id)}/quiz`);
+    const focusQuery = focus ? `?focus=${encodeURIComponent(focus)}` : "";
+    const payload = await api(`/api/notes/${encodeURIComponent(note.id)}/quiz${focusQuery}`);
     state.quiz = payload.questions || [];
     state.quizNoteId = state.quiz.length > 0 ? note.id : null;
     state.quizStartedAt = state.quiz.length > 0 ? Date.now() : 0;
@@ -1336,7 +1661,7 @@ async function startQuiz() {
 async function submitQuiz() {
   const note = activeNote();
   if (!note) return;
-  $("quizArea").innerHTML = quizSkeletonHTML("Grading quiz", "Saving your answers and preparing the review");
+  $("quizArea").innerHTML = gradingStateHTML();
   const answers = state.quiz.map((question) => ({
     questionId: question.id,
     variantId: question.variantId || "",
@@ -1360,15 +1685,6 @@ async function submitQuiz() {
   renderQuizResult(result);
 }
 
-async function checkModel() {
-  try {
-    await api("/api/model");
-    $("modelStatus").textContent = "Gemma 4";
-  } catch {
-    $("modelStatus").textContent = "Gemma 4";
-  }
-}
-
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => {
     if (button.dataset.tab === "notes") state.libraryMode = "list";
@@ -1377,6 +1693,18 @@ document.querySelectorAll(".tab").forEach((button) => {
   });
 });
 $("journeySelect")?.addEventListener("change", (event) => selectNote(event.target.value));
+$("quizFocusSelect")?.addEventListener("change", (event) => {
+  const note = activeNote();
+  if (!note) return;
+  state.quizFocusByNote[note.id] = event.target.value;
+  saveLocalState();
+  logAction("ui.quiz.focus_selected", {
+    noteId: note.id,
+    objectType: "note",
+    objectId: note.id,
+    focus: event.target.value || "any"
+  });
+});
 $("noteForm").addEventListener("submit", saveNote);
 $("startQuizButton").addEventListener("click", startQuiz);
 $("refreshButton")?.addEventListener("click", loadNotes);
@@ -1390,15 +1718,20 @@ document.querySelectorAll("[data-source-mode]").forEach((button) => {
 document.querySelectorAll("[data-math-template]").forEach((button) => {
   button.addEventListener("click", () => applyMathTemplateByKey(button.dataset.mathTemplate));
 });
+document.querySelectorAll("[data-book-template]").forEach((button) => {
+  button.addEventListener("click", () => applyBookTemplateByKey(button.dataset.bookTemplate));
+});
 $("noteTitle").addEventListener("input", () => {
   if (state.editorMode !== "new") return;
   if ($("noteTitle").value !== mathTemplateTitle()) state.mathTemplateApplied = false;
+  if ($("noteTitle").value !== bookTemplateTitle()) state.bookTemplateApplied = false;
   state.noteDraft.title = $("noteTitle").value;
   saveLocalState();
 });
 $("noteBody").addEventListener("input", () => {
   if (state.editorMode !== "new") return;
   if ($("noteBody").value !== mathTemplateBody()) state.mathTemplateApplied = false;
+  if ($("noteBody").value !== bookTemplateBody()) state.bookTemplateApplied = false;
   state.noteDraft.body = $("noteBody").value;
   saveLocalState();
 });
@@ -1413,7 +1746,6 @@ $("exportBackupButton")?.addEventListener("click", exportBackup);
 $("importBackupButton")?.addEventListener("click", () => $("backupFileInput")?.click());
 $("backupFileInput")?.addEventListener("change", (event) => restoreBackup(event.target.files?.[0]));
 
-checkModel();
 setTab(state.tab);
 loadNotes();
 loadSessions();

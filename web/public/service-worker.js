@@ -1,9 +1,9 @@
-const CACHE_NAME = "accordian-shell-v65";
+const CACHE_NAME = "accordian-shell-v78";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
-  "/styles.css?v=65",
-  "/app.js?v=65",
+  "/styles.css?v=78",
+  "/app.js?v=78",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

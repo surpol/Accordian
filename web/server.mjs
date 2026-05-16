@@ -77,6 +77,16 @@ function initDB() {
       difficulty REAL NOT NULL DEFAULT 1,
       created_at REAL NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS book_sections (
+      id TEXT PRIMARY KEY NOT NULL,
+      note_id TEXT NOT NULL,
+      section_index INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      text TEXT NOT NULL,
+      word_count INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS questions (
       id TEXT PRIMARY KEY NOT NULL,
       note_id TEXT NOT NULL,
@@ -296,13 +306,16 @@ function noteSummary(noteId) {
       n.title,
       n.body,
       n.summary,
+      n.source_type,
       n.status,
       n.created_at,
+      COUNT(DISTINCT bs.id) AS section_count,
       COUNT(DISTINCT q.id) AS question_count,
       COUNT(DISTINCT qq.id) AS queued_quiz_count,
       COUNT(DISTINCT a.id) AS attempt_count,
       COALESCE(NULLIF(AVG(q.understanding_score), 0), AVG(a.score), 0) AS average_score
     FROM notes n
+    LEFT JOIN book_sections bs ON bs.note_id = n.id
     LEFT JOIN questions q ON q.note_id = n.id
     LEFT JOIN quiz_queue qq ON qq.note_id = n.id AND qq.state = 'ready'
     LEFT JOIN attempts a ON a.note_id = n.id
@@ -318,8 +331,10 @@ function normalizeNote(row) {
     title: row.title,
     body: row.body,
     summary: row.summary || "",
+    sourceType: row.source_type || "text",
     status: row.status,
     createdAt: row.created_at,
+    sectionCount: Number(row.section_count || 0),
     questionCount: Number(row.question_count || 0),
     queuedQuizCount: Number(row.queued_quiz_count || 0),
     attemptCount: Number(row.attempt_count || 0),
@@ -335,13 +350,16 @@ function listNotes() {
       n.title,
       n.body,
       n.summary,
+      n.source_type,
       n.status,
       n.created_at,
+      COUNT(DISTINCT bs.id) AS section_count,
       COUNT(DISTINCT q.id) AS question_count,
       COUNT(DISTINCT qq.id) AS queued_quiz_count,
       COUNT(DISTINCT a.id) AS attempt_count,
       COALESCE(NULLIF(AVG(q.understanding_score), 0), AVG(a.score), 0) AS average_score
     FROM notes n
+    LEFT JOIN book_sections bs ON bs.note_id = n.id
     LEFT JOIN questions q ON q.note_id = n.id
     LEFT JOIN quiz_queue qq ON qq.note_id = n.id AND qq.state = 'ready'
     LEFT JOIN attempts a ON a.note_id = n.id
@@ -467,29 +485,109 @@ async function wikipediaArticle(title) {
   };
 }
 
-function createNote(title, text) {
+function isBookSourceType(sourceType) {
+  return String(sourceType || "").toLowerCase() === "books";
+}
+
+function wordCount(text) {
+  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function splitBookIntoSections(text) {
+  const clean = String(text || "").replace(/\r/g, "").trim();
+  if (!clean) return [];
+  const headingParts = clean
+    .split(/\n(?=(?:chapter|part|book|section)\s+[\divxlcdm]+[\s:.-])/i)
+    .map((part) => part.trim())
+    .filter((part) => wordCount(part) >= 80);
+  const sourceParts = headingParts.length >= 2 ? headingParts : [clean];
+  const sections = [];
+  for (const part of sourceParts) {
+    const words = part.split(/\s+/).filter(Boolean);
+    const heading = part.split("\n").find((line) => line.trim().length > 0)?.trim() || "";
+    for (let index = 0; index < words.length; index += 950) {
+      const slice = words.slice(index, index + 1100).join(" ");
+      if (wordCount(slice) < 60) continue;
+      sections.push({
+        title: heading && index === 0 ? heading.slice(0, 120) : `Section ${sections.length + 1}`,
+        text: slice,
+        wordCount: wordCount(slice)
+      });
+    }
+  }
+  return sections.length ? sections : [{ title: "Section 1", text: clean, wordCount: wordCount(clean) }];
+}
+
+function storeBookSections(noteId, text) {
+  sqlite(`DELETE FROM book_sections WHERE note_id = '${sqlEscape(noteId)}';`);
+  const sections = splitBookIntoSections(text);
+  sections.forEach((section, index) => {
+    sqlite(`
+      INSERT INTO book_sections (
+        id, note_id, section_index, title, text, word_count, created_at
+      ) VALUES (
+        '${crypto.randomUUID()}',
+        '${sqlEscape(noteId)}',
+        ${index},
+        '${sqlEscape(section.title)}',
+        '${sqlEscape(section.text)}',
+        ${Number(section.wordCount || 0)},
+        ${Date.now() / 1000}
+      );
+    `);
+  });
+  return sections.length;
+}
+
+function bookStudyText(noteId, limit = 4200) {
+  const sections = sqlite(`
+    SELECT section_index, title, text
+    FROM book_sections
+    WHERE note_id = '${sqlEscape(noteId)}'
+    ORDER BY section_index ASC
+    LIMIT 4
+  `, { json: true });
+  const joined = sections.map((section) => (
+    `## ${section.title || `Section ${Number(section.section_index || 0) + 1}`}\n${section.text || ""}`
+  )).join("\n\n");
+  return joined.slice(0, limit);
+}
+
+function sourceTextForGeneration(note, limit = 3000) {
+  if (isBookSourceType(note?.sourceType || note?.source_type)) {
+    const text = bookStudyText(note.id, limit);
+    if (text.trim()) return text;
+  }
+  return String(note?.body || "").slice(0, limit);
+}
+
+function createNote(title, text, sourceType = "text") {
   const id = crypto.randomUUID();
+  const cleanSourceType = isBookSourceType(sourceType) ? "books" : String(sourceType || "text").slice(0, 40);
   sqlite(`
-    INSERT INTO notes (id, title, body, status, created_at)
-    VALUES ('${id}', '${sqlEscape(title)}', '${sqlEscape(text)}', 'new', ${Date.now() / 1000});
+    INSERT INTO notes (id, title, body, source_type, status, created_at)
+    VALUES ('${id}', '${sqlEscape(title)}', '${sqlEscape(text)}', '${sqlEscape(cleanSourceType)}', 'new', ${Date.now() / 1000});
   `);
+  const sectionCount = isBookSourceType(cleanSourceType) ? storeBookSections(id, text) : 0;
   recordUserAction({
     noteId: id,
     actionType: "note.created",
     objectType: "note",
     objectId: id,
-    payload: { title, wordCount: text.trim().split(/\s+/).filter(Boolean).length }
+    payload: { title, sourceType: cleanSourceType, wordCount: wordCount(text), sectionCount }
   });
   return noteSummary(id);
 }
 
-function updateNote(noteId, title, text) {
+function updateNote(noteId, title, text, sourceType = "text") {
   const note = noteSummary(noteId);
   if (!note) return null;
+  const cleanSourceType = isBookSourceType(sourceType) ? "books" : String(sourceType || note.sourceType || "text").slice(0, 40);
   sqlite(`
     UPDATE notes
     SET title = '${sqlEscape(title)}',
         body = '${sqlEscape(text)}',
+        source_type = '${sqlEscape(cleanSourceType)}',
         summary = '',
         status = 'new'
     WHERE id = '${sqlEscape(noteId)}';
@@ -505,16 +603,18 @@ function updateNote(noteId, title, text) {
     DELETE FROM questions WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM concepts WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM learning_segments WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM book_sections WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM journey_assignments WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM topics WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM model_runs WHERE note_id = '${sqlEscape(noteId)}';
   `);
+  const sectionCount = isBookSourceType(cleanSourceType) ? storeBookSections(noteId, text) : 0;
   recordUserAction({
     noteId,
     actionType: "note.updated",
     objectType: "note",
     objectId: noteId,
-    payload: { title, wordCount: text.trim().split(/\s+/).filter(Boolean).length }
+    payload: { title, sourceType: cleanSourceType, wordCount: wordCount(text), sectionCount }
   });
   return noteSummary(noteId);
 }
@@ -605,6 +705,17 @@ function answerKeysOverlap(left, right) {
   return overlap / Math.min(leftTokens.size, rightTokens.size) >= 0.8;
 }
 
+function tokenOverlapRatio(left, right) {
+  const leftTokens = tokenSet(left);
+  const rightTokens = tokenSet(right);
+  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) overlap += 1;
+  }
+  return overlap / Math.min(leftTokens.size, rightTokens.size);
+}
+
 function answerKeyOverlapsAny(answerKey, otherKeys) {
   return [...otherKeys].some((otherKey) => answerKeysOverlap(answerKey, otherKey));
 }
@@ -668,6 +779,7 @@ async function gemmaText(prompt, timeoutMs = 120000, options = {}) {
     body: JSON.stringify({
       model: gemmaModel,
       stream: false,
+      think: false,
       ...(options.format ? { format: options.format } : {}),
       messages: [
         {
@@ -722,7 +834,7 @@ function isMathNote(note) {
 }
 
 function minimumQuestionBankFor(note) {
-  if (isMathNote(note)) return 4;
+  if (isMathNote(note)) return 2;
   const words = String(note?.body || "").trim().split(/\s+/).filter(Boolean).length;
   if (words < 80) return 3;
   if (words < 160) return 4;
@@ -730,17 +842,23 @@ function minimumQuestionBankFor(note) {
 }
 
 function noteNeedsQuestionBackfill(note) {
-  return Number(note?.questionCount || 0) < minimumQuestionBankFor(note);
+  if (!note?.id) return Number(note?.questionCount || 0) < minimumQuestionBankFor(note);
+  return viableQuestionCount(note.id, note) < minimumQuestionBankFor(note);
 }
 
 function quizPromptFor(note, target) {
   const safeTarget = isMathNote(note) ? 4 : Math.min(8, Math.max(5, target));
+  const sourceText = sourceTextForGeneration(note, isMathNote(note) ? 2200 : isBookSourceType(note?.sourceType) ? 4200 : 2600);
   if (isMathNote(note)) {
     return `
 You are creating a short math quiz from a structured math note.
 Use ONLY the note text. Do not use outside facts.
 Create exactly ${safeTarget} useful multiple-choice question objects.
 Cover formula recall, worked-example reasoning, common mistakes, and practice application.
+At least half of the questions must require doing the math from the formulas or worked examples.
+Ask actual student-facing questions. Do not ask meta questions about what the student wants to practice.
+Do not use wording like "practice to practice", "what should you practice", or "which topic is listed".
+For math application questions, include concrete numbers in the prompt and make the correct answer a computed result.
 Keep prompts concise. Make every answer exactly match one of the 4 choices.
 Return valid JSON only. No markdown. No commentary.
 
@@ -776,7 +894,7 @@ NOTE TITLE:
 ${note.title}
 
 NOTE TEXT:
-${note.body.slice(0, 2200)}
+${sourceText}
 `;
   }
   return `
@@ -824,7 +942,7 @@ NOTE TITLE:
 ${note.title}
 
 NOTE TEXT:
-${note.body.slice(0, 2600)}
+${sourceText}
 `;
 }
 
@@ -881,12 +999,30 @@ function existingAnswerKeys(noteId) {
   `, { json: true }).map((row) => answerMemoryKey(row)).filter(Boolean));
 }
 
+function viableQuestionCount(noteId, note = null) {
+  const sourceNote = note || noteSummary(noteId);
+  return sqlite(`
+    SELECT
+      q.*,
+      v.id AS variant_id,
+      v.delivery_type,
+      v.prompt AS variant_prompt,
+      v.answer AS variant_answer,
+      v.choices AS variant_choices
+    FROM questions q
+    LEFT JOIN question_variants v ON v.question_id = q.id
+    WHERE q.note_id = '${sqlEscape(noteId)}'
+      AND COALESCE(v.delivery_type, 'multiple_choice') = 'multiple_choice'
+    GROUP BY q.id
+  `, { json: true }).filter((row) => !isLowQualityQuestion(row, sourceNote)).length;
+}
+
 function uncoveredNotePassages(note, existingQuestions) {
   const coveredText = existingQuestions
     .flatMap((item) => [item.topic, item.subtopic, item.prompt, item.answer])
     .join(" ");
   const coveredTokens = tokenSet(coveredText);
-  return String(note.body || "")
+  return sourceTextForGeneration(note, 9000)
     .split(/(?<=[.!?])\s+/)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 60)
@@ -1192,7 +1328,12 @@ function segmentIdFor(noteId, topicId, question) {
 }
 
 function normalizeChoice(value) {
-  return normalizeText(value).replace(/\s+/g, " ").trim();
+  const raw = String(value || "").trim();
+  const numeric = raw.replace(/[,%°]/g, "").trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(numeric)) {
+    return String(Number(numeric));
+  }
+  return normalizeText(raw).replace(/\s+/g, " ").trim();
 }
 
 function recordNumbers(value) {
@@ -1234,6 +1375,8 @@ function validatedMultipleChoiceVariant(variant, fallbackPrompt, fallbackAnswer)
 
   const normalizedChoices = rawChoices.map(normalizeChoice);
   if (new Set(normalizedChoices).size !== 4) return { valid: false, reason: "duplicate_choices" };
+  const displayChoices = rawChoices.map((choice) => normalizeText(choice));
+  if (new Set(displayChoices).size !== 4) return { valid: false, reason: "duplicate_display_choices" };
 
   const answerNorm = normalizeChoice(rawAnswer);
   const answerIndex = normalizedChoices.findIndex((choice) => choice === answerNorm);
@@ -1247,6 +1390,8 @@ function validatedMultipleChoiceVariant(variant, fallbackPrompt, fallbackAnswer)
     if (choiceNorm === answerNorm) return true;
     if (answerNorm.length >= 8 && choiceNorm.includes(answerNorm)) return true;
     if (choiceNorm.length >= 8 && answerNorm.includes(choiceNorm)) return true;
+    const formulaLike = /[=^√]|\bsqrt\b/i.test(choice) || /[=^√]|\bsqrt\b/i.test(answer);
+    if (!formulaLike && tokenSet(choiceNorm).size >= 3 && tokenSet(answerNorm).size >= 3 && tokenOverlapRatio(choiceNorm, answerNorm) >= 0.66) return true;
     return false;
   });
   if (brokenDistractor) return { valid: false, reason: "broken_distractor" };
@@ -1261,6 +1406,52 @@ function validatedMultipleChoiceVariant(variant, fallbackPrompt, fallbackAnswer)
       choices: rawChoices
     }
   };
+}
+
+function hasRepeatedAdjacentWords(value) {
+  const words = normalizeText(value).split(" ").filter(Boolean);
+  return words.some((word, index) => index > 0 && word === words[index - 1] && word.length > 2);
+}
+
+function isLowQualityQuestion(question, note) {
+  const prompt = String(question.canonical_prompt || question.prompt || question.variants?.[0]?.prompt || "").trim();
+  const answer = String(question.canonical_answer || question.answer || question.variants?.[0]?.answer || "").trim();
+  const normalizedPrompt = normalizeText(prompt);
+  if (!prompt || !answer) return true;
+  if (hasRepeatedAdjacentWords(prompt)) return true;
+
+  const choices = (() => {
+    if (Array.isArray(question.choices)) return question.choices;
+    if (Array.isArray(question.variants?.[0]?.choices)) return question.variants[0].choices;
+    const encoded = question.variant_choices || question.choices;
+    if (typeof encoded === "string" && encoded.trim().startsWith("[")) {
+      try { return JSON.parse(encoded); } catch { return []; }
+    }
+    return [];
+  })();
+  if (choices.length > 0 && !validatedMultipleChoiceVariant({ prompt, answer, choices }, prompt, answer).valid) return true;
+
+  const blockedMetaPatterns = [
+    /\bpractice to practice\b/i,
+    /\bwhat (do|should|would) you want to practice\b/i,
+    /\bwhat type of .* should you practice\b/i,
+    /\bwhich .* is listed\b/i,
+    /\baccording to the section titled what i want to practice\b/i,
+    /\bwhich (action|of the following) is (listed as )?a common mistake\b/i
+  ];
+  if (blockedMetaPatterns.some((pattern) => pattern.test(prompt))) return true;
+
+  if (isMathNote(note)) {
+    const angle = normalizeText(question.assessment_angle || question.assessmentAngle || "");
+    const looksApplication = angle.includes("application") || /\b(solve|find|calculate|compute|evaluate|at\s+\d{1,2}:\d{2}|for\s+\d+|from\s+\d+|if\s+)\b/i.test(prompt);
+    const hasNumbers = /\d/.test(prompt);
+    const isMetaPractice = /\bpractice\b/i.test(prompt) && !looksApplication;
+    if (isMetaPractice) return true;
+    if (looksApplication && !hasNumbers) return true;
+    if (normalizedPrompt.split(" ").length < 4) return true;
+  }
+
+  return false;
 }
 
 function hasSourceBackedDistractor(variant, sourceText) {
@@ -1309,6 +1500,7 @@ function insertVariant(noteId, questionId, variant) {
 }
 
 function insertQuestions(noteId, questions, generationSource) {
+  const note = noteSummary(noteId);
   const existing = existingPromptFingerprints(noteId);
   const existingConcepts = existingConceptSignatures(noteId);
   const existingCanonicalKeys = existingCanonicalConceptKeys(noteId);
@@ -1329,6 +1521,7 @@ function insertQuestions(noteId, questions, generationSource) {
     const rawPrompt = String(question.canonical_prompt || question.prompt || variants[0]?.prompt || "").trim();
     const answer = String(question.canonical_answer || question.answer || variants[0]?.answer || "").trim();
     const prompt = repairSeasonRecordPrompt(rawPrompt, answer, sourceExcerpt);
+    if (isLowQualityQuestion({ ...question, canonical_prompt: prompt, canonical_answer: answer }, note)) continue;
     const fingerprint = promptFingerprint(prompt);
     const normalizedQuestion = { ...question, prompt, answer, source_excerpt: sourceExcerpt };
     const signature = conceptSignature(normalizedQuestion);
@@ -1446,6 +1639,7 @@ function deleteNote(noteId) {
     DELETE FROM questions WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM concepts WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM learning_segments WHERE note_id = '${sqlEscape(noteId)}';
+    DELETE FROM book_sections WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM journey_assignments WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM topics WHERE note_id = '${sqlEscape(noteId)}';
     DELETE FROM model_runs WHERE note_id = '${sqlEscape(noteId)}';
@@ -1497,7 +1691,9 @@ function recordQuizStarted(noteId, quiz) {
   });
 }
 
-function selectedQuizRows(noteId) {
+function selectedQuizRows(noteId, options = {}) {
+  const note = noteSummary(noteId);
+  const focus = normalizeText(options.focus || "");
   const masteredQuizFingerprints = recentMasteredQuizFingerprints(noteId);
   const latestSession = sqlite(`
     SELECT attempt_ids, score
@@ -1517,6 +1713,15 @@ function selectedQuizRows(noteId) {
       WHERE id IN (${latestAttemptIds.map((id) => `'${sqlEscape(id)}'`).join(",")})
     `, { json: true }).map((row) => row.question_id))
     : new Set();
+  const recentCorrectQuestionIds = new Set(sqlite(`
+    SELECT question_id
+    FROM attempts
+    WHERE note_id = '${sqlEscape(noteId)}'
+      AND score >= 0.95
+      AND created_at >= ${(Date.now() / 1000) - (7 * 86400)}
+    ORDER BY created_at DESC
+    LIMIT 80
+  `, { json: true }).map((row) => row.question_id));
 
   const rows = sqlite(`
     SELECT
@@ -1536,7 +1741,11 @@ function selectedQuizRows(noteId) {
     WHERE q.note_id = '${sqlEscape(noteId)}'
       AND COALESCE(v.delivery_type, 'multiple_choice') = 'multiple_choice'
     GROUP BY q.id
-  `, { json: true });
+  `, { json: true }).filter((row) => {
+    if (isLowQualityQuestion(row, note)) return false;
+    if (!focus) return true;
+    return normalizeText(`${row.topic || ""} ${row.subtopic || ""}`).includes(focus);
+  });
 
   const pool = rows.length - latestQuestionIds.size >= 8
     ? rows.filter((row) => latestQuestionIds.has(row.id) === false)
@@ -1559,6 +1768,33 @@ function selectedQuizRows(noteId) {
     .filter((row) => Number(row.attempt_count || 0) > 0 && Number(row.average_score) < 0.8)
     .map((row) => conceptRootKey(row))
     .filter(Boolean));
+  const recentCorrectRows = rows.filter((row) => recentCorrectQuestionIds.has(row.id));
+  const recentCorrectConceptKeys = new Set(recentCorrectRows.map((row) => canonicalConceptKey(row)).filter(Boolean));
+  const recentCorrectConceptRoots = new Set(recentCorrectRows.map((row) => conceptRootKey(row)).filter(Boolean));
+  const recentCorrectAnswerKeys = new Set(recentCorrectRows.map((row) => answerMemoryKey(row)).filter(Boolean));
+  const recentCorrectPromptKeys = new Set(recentCorrectRows.map((row) => promptFingerprint(row.variant_prompt || row.prompt)).filter(Boolean));
+  const wasRecentlyCorrect = (row) => {
+    const conceptKey = canonicalConceptKey(row);
+    const conceptRoot = conceptRootKey(row);
+    const answerKey = answerMemoryKey(row);
+    const promptKey = promptFingerprint(row.variant_prompt || row.prompt);
+    return recentCorrectQuestionIds.has(row.id) ||
+      recentCorrectConceptKeys.has(conceptKey) ||
+      recentCorrectConceptRoots.has(conceptRoot) ||
+      recentCorrectPromptKeys.has(promptKey) ||
+      (answerKey && (recentCorrectAnswerKeys.has(answerKey) || answerKeyOverlapsAny(answerKey, recentCorrectAnswerKeys)));
+  };
+  const viableFreshRows = rows.filter((row) => {
+    const conceptKey = canonicalConceptKey(row);
+    const conceptRoot = conceptRootKey(row);
+    if (latestSessionScore >= 0.95 && wasRecentlyCorrect(row)) return false;
+    return !wasRecentlyCorrect(row) ||
+      weakConceptKeys.has(conceptKey) ||
+      weakRoots.has(conceptRoot);
+  });
+  const canServeWithoutRecentCorrect = note
+    ? viableFreshRows.length >= Math.min(minimumQuestionBankFor(note), 8)
+    : viableFreshRows.length >= 3;
 
   const ranked = pool.sort((left, right) => {
     const score = (row) => {
@@ -1569,6 +1805,7 @@ function selectedQuizRows(noteId) {
       const conceptKey = canonicalConceptKey(row);
       const conceptRoot = conceptRootKey(row);
       const answerKey = answerMemoryKey(row);
+      const recentlyCorrect = wasRecentlyCorrect(row);
       const recentlyMastered = latestSessionScore >= 0.95 &&
         (
           latestConceptKeys.has(conceptKey) ||
@@ -1581,11 +1818,15 @@ function selectedQuizRows(noteId) {
       const justMasteredPenalty = recentlyMastered
         ? -700
         : 0;
+      const recentCorrectPenalty = canServeWithoutRecentCorrect && recentlyCorrect
+        ? -1200
+        : 0;
       return (
         (attempts === 0 ? 1000 : 0) +
         (average >= 0 && average < 0.8 ? 500 : 0) +
         (latestQuestionIds.has(row.id) ? -250 : 0) +
         justMasteredPenalty +
+        recentCorrectPenalty +
         Number(row.importance || 1) * 30 +
         Number(row.difficulty || 1) * (latestSessionScore >= 0.95 ? 45 : 20) +
         age +
@@ -1613,8 +1854,11 @@ function selectedQuizRows(noteId) {
       latestConceptRoots.has(conceptRoot);
     const recentlyMasteredAnswer = answerKey &&
       (latestAnswerKeys.has(answerKey) || answerKeyOverlapsAny(answerKey, latestAnswerKeys));
+    const recentlyCorrect = wasRecentlyCorrect(row);
     if (selectedKeys.has(key)) continue;
     if (selectedConceptRoots.has(conceptRoot)) continue;
+    if (latestSessionScore >= 0.95 && recentlyCorrect) continue;
+    if (canServeWithoutRecentCorrect && recentlyCorrect && !isWeak && !isWeakRoot) continue;
     if (
       latestSessionScore >= 0.95 &&
       (recentlyMasteredConcept || recentlyMasteredAnswer) &&
@@ -1647,6 +1891,9 @@ function selectedQuizRows(noteId) {
       if (matchingKey || matchingConcept || matchingAnswer) continue;
       const recentlyMasteredAnswer = answerKey &&
         (latestAnswerKeys.has(answerKey) || answerKeyOverlapsAny(answerKey, latestAnswerKeys));
+      const recentlyCorrect = wasRecentlyCorrect(row);
+      if (latestSessionScore >= 0.95 && recentlyCorrect) continue;
+      if (canServeWithoutRecentCorrect && recentlyCorrect) continue;
       if (
         latestSessionScore >= 0.95 &&
         (latestConceptRoots.has(conceptRoot) || recentlyMasteredAnswer)
@@ -1655,10 +1902,20 @@ function selectedQuizRows(noteId) {
       if (sorted.length >= 8) break;
     }
   }
+  const minimumRows = note ? Math.min(minimumQuestionBankFor(note), ranked.length, 8) : Math.min(3, ranked.length);
+  if (sorted.length < minimumRows) {
+    for (const row of ranked) {
+      if (sorted.some((candidate) => candidate.id === row.id)) continue;
+      if (latestSessionScore >= 0.95 && wasRecentlyCorrect(row)) continue;
+      sorted.push(row);
+      if (sorted.length >= minimumRows) break;
+    }
+  }
   const quiz = rowsToQuiz(sorted);
 
   const quizFingerprint = quizConceptSetFingerprint(quiz);
-  if (quiz.length > 0 && masteredQuizFingerprints.has(quizFingerprint)) {
+  const canMoveBeyondMasteredSet = rows.length > (note ? minimumQuestionBankFor(note) + 1 : quiz.length);
+  if (quiz.length > 0 && masteredQuizFingerprints.has(quizFingerprint) && canMoveBeyondMasteredSet) {
     recordUserAction({
       noteId,
       actionType: "quiz.suppressed_mastered_repeat",
@@ -1721,6 +1978,7 @@ function queuedQuizCount(noteId) {
 }
 
 function questionRowsByIds(noteId, ids) {
+  const note = noteSummary(noteId);
   const cleanIds = (ids || []).map((id) => String(id || "").trim()).filter(Boolean);
   if (cleanIds.length === 0) return [];
   const rows = sqlite(`
@@ -1737,7 +1995,7 @@ function questionRowsByIds(noteId, ids) {
     WHERE q.note_id = '${sqlEscape(noteId)}'
       AND q.id IN (${cleanIds.map((id) => `'${sqlEscape(id)}'`).join(",")})
       AND COALESCE(v.delivery_type, 'multiple_choice') = 'multiple_choice'
-  `, { json: true });
+  `, { json: true }).filter((row) => !isLowQualityQuestion(row, note));
   const order = new Map(cleanIds.map((id, index) => [id, index]));
   return rows.sort((left, right) => (order.get(left.id) ?? 999) - (order.get(right.id) ?? 999));
 }
@@ -1777,14 +2035,20 @@ function latestQuizEvidence(noteId, rows, reason) {
   return { summary, targetConcepts: concepts, avoidedConcepts, reason };
 }
 
-function enqueueQuizForNote(noteId, reason = "prepared") {
+function enqueueQuizForNote(noteId, reason = "prepared", options = {}) {
   if (queuedQuizCount(noteId) > 0) {
     return { status: "already_ready", saved: 0 };
   }
-  const selected = selectedQuizRows(noteId);
+  const note = noteSummary(noteId);
+  const selected = selectedQuizRows(noteId, options);
   if (selected.suppressed) return selected.nextQuiz || { status: "preparing", saved: 0 };
   const rows = selected.rows || [];
   if (rows.length === 0) return { status: "empty", saved: 0 };
+  const viableCount = note ? viableQuestionCount(noteId, note) : rows.length;
+  const minimumServableRows = Math.min(minimumQuestionBankFor(note), Math.max(2, viableCount));
+  if (note && rows.length < minimumServableRows) {
+    return { status: "insufficient_viable_questions", saved: rows.length };
+  }
   const id = crypto.randomUUID();
   const evidence = latestQuizEvidence(noteId, rows, reason);
   sqlite(`
@@ -1819,7 +2083,7 @@ async function prepareInitialQuiz(noteId) {
   if (!note) return { saved: 0, status: "missing_note" };
   sqlite(`UPDATE notes SET status = 'building' WHERE id = '${sqlEscape(noteId)}';`);
   try {
-    const target = questionTargetFor(note.body);
+    const target = questionTargetFor(sourceTextForGeneration(note, 9000));
     const result = await gemmaJSON(quizPromptFor(note, target));
     let saved = saveQuestions(noteId, result.summary, result.questions || []);
     const minimum = minimumQuestionBankFor(note);
@@ -1875,10 +2139,10 @@ function queueInitialQuiz(noteId) {
   }
   if (note.questionCount > 0) {
     const queued = enqueueQuizForNote(noteId, "starter");
-    if (queued.status === "empty") {
+    if (queued.status === "empty" || queued.status === "insufficient_viable_questions") {
       return queueNextQuiz(noteId, [], {
         force: true,
-        reason: "no_ready_quiz_unlock"
+        reason: queued.status === "empty" ? "no_ready_quiz_unlock" : "low_question_bank"
       });
     }
     return queued;
@@ -1942,6 +2206,14 @@ function startQuiz(noteId) {
     const queued = queueInitialQuiz(noteId);
     if (queued.status === "ready" || queued.status === "already_ready") {
       queuedQuiz = consumeQueuedQuiz(noteId);
+    } else if (queued.status === "insufficient_viable_questions") {
+      return {
+        questions: [],
+        nextQuiz: queueNextQuiz(noteId, [], {
+          force: true,
+          reason: "low_question_bank"
+        })
+      };
     } else {
       return { questions: [], nextQuiz: queued };
     }
@@ -1957,6 +2229,72 @@ function startQuiz(noteId) {
       summary: queuedQuiz.queue.summary
     } : null
   };
+}
+
+function startFocusedQuiz(noteId, focus) {
+  const cleanFocus = String(focus || "").trim();
+  if (!cleanFocus) return startQuiz(noteId);
+  sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
+  const queued = enqueueQuizForNote(noteId, `focus:${cleanFocus}`, { focus: cleanFocus });
+  if (queued.status === "ready") return startQuiz(noteId);
+  return {
+    questions: [],
+    nextQuiz: queueNextQuiz(noteId, [], {
+      force: true,
+      reason: "focused_quiz",
+      focus: cleanFocus
+    })
+  };
+}
+
+function quizFocusOptions(noteId) {
+  const topicRows = sqlite(`
+    SELECT
+      topic,
+      COUNT(*) AS question_count,
+      COALESCE(AVG(understanding_score), 0) AS average_score
+    FROM questions
+    WHERE note_id = '${sqlEscape(noteId)}'
+      AND TRIM(topic) <> ''
+    GROUP BY topic
+    ORDER BY topic COLLATE NOCASE
+  `, { json: true }).map((row) => ({
+    type: "topic",
+    value: row.topic || "",
+    topic: row.topic || "Topic",
+    subtopic: "",
+    questionCount: Number(row.question_count || 0),
+    averageScore: Number(row.average_score || 0)
+  })).filter((row) => row.value);
+
+  const subtopicRows = sqlite(`
+    SELECT
+      topic,
+      subtopic,
+      COUNT(*) AS question_count,
+      COALESCE(AVG(understanding_score), 0) AS average_score
+    FROM questions
+    WHERE note_id = '${sqlEscape(noteId)}'
+      AND TRIM(topic) <> ''
+      AND TRIM(subtopic) <> ''
+    GROUP BY topic, subtopic
+    ORDER BY topic COLLATE NOCASE, subtopic COLLATE NOCASE
+  `, { json: true }).map((row) => ({
+    type: "subtopic",
+    value: `${row.topic || ""} ${row.subtopic || ""}`.trim(),
+    topic: row.topic || "Topic",
+    subtopic: row.subtopic || "Concept",
+    questionCount: Number(row.question_count || 0),
+    averageScore: Number(row.average_score || 0)
+  })).filter((row) => row.value);
+
+  const seen = new Set();
+  return [...topicRows, ...subtopicRows].filter((row) => {
+    const key = `${row.type}:${normalizeText(row.value)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function repairMissingQuizQueues() {
@@ -2270,6 +2608,8 @@ Do not return a question whose correct answer is equivalent to an existing answe
 Do not turn a mastered answer into a new prompt. Move to a fresh adjacent concept from the note.
 Prioritize the untapped note passages. They are the evidence SQLite found that is least covered by prior questions.
 Prefer comparison, sequence, consequence, and application checks over basic recall.
+For math notes, at least half of the questions must require calculation with concrete numbers.
+For math notes, do not ask meta questions about what the learner wants to practice or what is listed in a section.
 Every question must be answerable from the note text.
 Every question needs one multiple_choice variant with exactly 4 choices and the exact answer included.
 
@@ -2315,7 +2655,7 @@ NOTE TITLE:
 ${note.title}
 
 NOTE TEXT:
-${note.body.slice(0, 3000)}
+${sourceTextForGeneration(note, 3000)}
 `;
   }
 
@@ -2338,6 +2678,8 @@ Goals:
 - If the latest quiz score is 100%, create adjacent or harder concepts from the note instead of repeating mastered concepts.
 - If expansion reason is mastered_repeat_suppressed, the learner already mastered the selected concepts. Generate harder, adjacent, or more integrative checks from the note. Do not return any question that tests the same answer in the same way.
 - Prefer one durable question per distinct concept. Do not create multiple questions whose correct answer is the same fact.
+- For math notes, at least half of the questions must require calculation with concrete numbers.
+- For math notes, do not ask meta questions about what the learner wants to practice or what is listed in a section.
 - Include a multiple_choice variant for every question.
 - Include a short_answer variant when useful.
 - Every multiple_choice variant must have exactly 4 choices and one exact answer present in choices.
@@ -2397,7 +2739,7 @@ NOTE TITLE:
 ${note.title}
 
 NOTE TEXT:
-${note.body.slice(0, 6000)}
+${sourceTextForGeneration(note, 6000)}
 `;
 }
 
@@ -2419,6 +2761,7 @@ You are Accordian's coverage backfill agent.
 Use ONLY UNTAPPED_PASSAGES. Create exactly ${target} fresh multiple-choice question objects.
 Do not reuse or paraphrase any EXISTING_ANSWER_KEYS.
 For cause/effect or sequence questions, the answer must be temporally consistent with the source passage. A later event cannot cause an earlier event.
+For math notes, create real calculation or procedure questions with concrete numbers, not meta practice-plan questions.
 Each question needs exactly 4 choices and one exact answer present in choices.
 Incorrect choices must be false for the source excerpt. Do not use another true item from the same list as a distractor.
 Return JSON only:
@@ -2462,15 +2805,15 @@ async function prepareNextQuiz(noteId, details, options = {}) {
   if (!note) return { saved: 0, status: "missing_note" };
   const missCount = details.filter((item) => item.score < 1).length;
   const currentCount = Number(note.questionCount || 0);
-  const maxCount = Math.max(questionTargetFor(note.body) * 2, 24);
+  const maxCount = Math.max(questionTargetFor(sourceTextForGeneration(note, 9000)) * 2, 24);
   if (!options.force && currentCount >= maxCount && missCount === 0) {
     const queued = enqueueQuizForNote(noteId, "scheduled");
     return { saved: queued.saved || 0, status: queued.status === "empty" ? "enough_questions" : queued.status };
   }
 
   const target = options.force
-    ? Math.min(8, Math.max(6, Math.ceil(questionTargetFor(note.body) / 3)))
-    : Math.min(6, Math.max(4, missCount, Math.ceil(questionTargetFor(note.body) / 4)));
+    ? Math.min(8, Math.max(6, Math.ceil(questionTargetFor(sourceTextForGeneration(note, 9000)) / 3)))
+    : Math.min(6, Math.max(4, missCount, Math.ceil(questionTargetFor(sourceTextForGeneration(note, 9000)) / 4)));
   sqlite(`UPDATE notes SET status = 'building' WHERE id = '${sqlEscape(noteId)}';`);
   try {
     const backfillOnly = options.reason === "no_ready_quiz_unlock" || options.reason === "low_question_bank";
@@ -2488,8 +2831,8 @@ async function prepareNextQuiz(noteId, details, options = {}) {
     const refreshed = noteSummary(noteId);
     const queued = noteNeedsQuestionBackfill(refreshed)
       ? { status: "insufficient_bank", saved: 0 }
-      : enqueueQuizForNote(noteId, options.force ? "mastery_expansion" : "follow_up");
-    if (queued.status === "insufficient_bank") {
+      : enqueueQuizForNote(noteId, options.force ? "mastery_expansion" : "follow_up", { focus: options.focus || "" });
+    if (queued.status === "insufficient_bank" || queued.status === "insufficient_viable_questions") {
       sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
     }
     sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
@@ -2841,8 +3184,9 @@ async function handleAPI(request, response, url) {
     const body = await readJSON(request);
     const title = String(body.title || "Untitled Note").trim();
     const text = String(body.body || "").trim();
+    const sourceType = String(body.sourceType || body.source_type || "text").trim();
     if (!text) return writeJSON(response, 400, { error: "Note text is required." });
-    const note = createNote(title, text);
+    const note = createNote(title, text, sourceType);
     queueInitialQuiz(note.id);
     return writeJSON(response, 201, { note: noteSummary(note.id), nextQuiz: { status: "preparing", saved: 0 } });
   }
@@ -2853,8 +3197,9 @@ async function handleAPI(request, response, url) {
     const body = await readJSON(request);
     const title = String(body.title || "Untitled Note").trim();
     const text = String(body.body || "").trim();
+    const sourceType = String(body.sourceType || body.source_type || "text").trim();
     if (!text) return writeJSON(response, 400, { error: "Note text is required." });
-    const note = updateNote(noteId, title, text);
+    const note = updateNote(noteId, title, text, sourceType);
     if (!note) return writeJSON(response, 404, { error: "Note not found." });
     queueInitialQuiz(note.id);
     return writeJSON(response, 200, { note: noteSummary(note.id), nextQuiz: { status: "preparing", saved: 0 } });
@@ -2879,7 +3224,14 @@ async function handleAPI(request, response, url) {
   const quizMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/quiz$/);
   if (request.method === "GET" && quizMatch) {
     const noteId = quizMatch[1];
-    return writeJSON(response, 200, startQuiz(noteId));
+    const focus = String(url.searchParams.get("focus") || "").trim();
+    return writeJSON(response, 200, focus ? startFocusedQuiz(noteId, focus) : startQuiz(noteId));
+  }
+
+  const focusMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/focus-options$/);
+  if (request.method === "GET" && focusMatch) {
+    const noteId = focusMatch[1];
+    return writeJSON(response, 200, { options: quizFocusOptions(noteId) });
   }
 
   const submitMatch = url.pathname.match(/^\/api\/notes\/([^/]+)\/quiz$/);
