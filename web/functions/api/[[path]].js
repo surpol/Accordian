@@ -250,9 +250,16 @@ async function ensureQuestions(env, noteId) {
   const existing = await env.DB.prepare(`SELECT prompt, answer FROM questions WHERE note_id = ?`).bind(noteId).all();
   const existingQuestions = existing.results || [];
   const desired = desiredQuestionCount(note);
+  let insertedQuestions = false;
   if (existingQuestions.length < desired) {
     const questions = await generateQuestions(env, note, desired - existingQuestions.length, existingQuestions);
-    for (const question of questions) await insertQuestion(env.DB, noteId, question);
+    for (const question of questions) {
+      await insertQuestion(env.DB, noteId, question);
+      insertedQuestions = true;
+    }
+  }
+  if (insertedQuestions) {
+    await env.DB.prepare(`DELETE FROM quiz_queue WHERE note_id = ? AND state = 'ready'`).bind(noteId).run();
   }
   await queueQuiz(env.DB, noteId);
   return noteSummary(env.DB, noteId);
@@ -369,7 +376,10 @@ async function submitQuiz(env, noteId, answers) {
     .bind(sessionId, noteId, score, JSON.stringify(attemptIds), now())
     .run();
   await env.DB.prepare(`DELETE FROM quiz_queue WHERE note_id = ? AND state = 'ready'`).bind(noteId).run();
-  await queueQuiz(env.DB, noteId);
+  if (score >= 0.9) {
+    await expandAfterMastery(env, noteId);
+  }
+  await ensureQuestions(env, noteId);
   return {
     id: sessionId,
     noteId,
@@ -378,6 +388,19 @@ async function submitQuiz(env, noteId, answers) {
     nextQuiz: { status: "ready", saved: details.length },
     learningEvidence: { summary: "D1 saved this quiz attempt and updated each question's understanding score." }
   };
+}
+
+async function expandAfterMastery(env, noteId) {
+  const note = await noteSummary(env.DB, noteId);
+  const existing = await env.DB.prepare(`SELECT prompt, answer FROM questions WHERE note_id = ?`).bind(noteId).all();
+  const existingQuestions = existing.results || [];
+  if (existingQuestions.length >= 24) return;
+  try {
+    const questions = await generateQuestions(env, note, Math.min(4, 24 - existingQuestions.length), existingQuestions, false);
+    for (const question of questions) await insertQuestion(env.DB, noteId, question);
+  } catch {
+    // Keep grading reliable even if the model cannot expand the bank on this pass.
+  }
 }
 
 async function allSessions(db) {
@@ -566,7 +589,7 @@ function desiredQuestionCount(note) {
   return Math.max(8, Math.min(24, Math.ceil(words / 70) * 4));
 }
 
-async function generateQuestions(env, note, requestedCount = desiredQuestionCount(note), existingQuestions = []) {
+async function generateQuestions(env, note, requestedCount = desiredQuestionCount(note), existingQuestions = [], requireFull = true) {
   const target = Math.max(1, Math.min(16, Number(requestedCount || 0)));
   const gemma = gemmaStatus(env);
   if (!gemma.available) {
@@ -574,16 +597,12 @@ async function generateQuestions(env, note, requestedCount = desiredQuestionCoun
   }
   const questions = [];
   const blockedPrompts = existingQuestions.map((question) => String(question.prompt || "")).filter(Boolean);
-  const blockedAnswers = existingQuestions.map((question) => String(question.answer || "")).filter(Boolean);
   for (let pass = 0; pass < 3 && questions.length < target; pass += 1) {
     const missing = target - questions.length;
     const result = await gemmaJSON(env, `
 Create exactly ${missing} new high-quality multiple-choice quiz questions from this note.
 Use only the note. Avoid duplicate questions and avoid these existing prompts:
 ${[...blockedPrompts, ...questions.map((question) => question.prompt)].map((prompt) => `- ${prompt}`).join("\n") || "- none yet"}
-
-Also avoid questions with the same correct answer as these:
-${[...blockedAnswers, ...questions.map((question) => question.answer)].map((answer) => `- ${answer}`).join("\n") || "- none yet"}
 
 Return JSON only with this exact shape:
 {"questions":[{"topic":"specific topic","subtopic":"specific subtopic","prompt":"clear question","answer":"correct answer from the note","choices":["wrong but plausible","correct answer from the note","wrong but plausible","wrong but plausible"]}]}
@@ -606,7 +625,7 @@ NOTE: ${note.body.slice(0, 9000)}
       if (questions.length >= target) break;
     }
   }
-  if (questions.length >= target) return questions.slice(0, target);
+  if (questions.length >= target || (!requireFull && questions.length > 0)) return questions.slice(0, target);
   throw new Error(`Gemma produced ${questions.length} valid questions, but ${target} were needed. Rebuild this quiz after checking the note or model connection.`);
 }
 
@@ -627,10 +646,12 @@ function isDuplicateQuestion(candidate, existingQuestions) {
   return existingQuestions.some((existing) => {
     const existingPrompt = normalize(existing.prompt);
     const existingAnswer = normalize(existing.answer);
+    const promptSimilarity = tokenOverlap(prompt, existingPrompt);
+    const answerSimilarity = tokenOverlap(answer, existingAnswer);
     return prompt === existingPrompt ||
-      answer === existingAnswer ||
-      tokenOverlap(prompt, existingPrompt) >= 0.78 ||
-      (answer.length > 12 && tokenOverlap(answer, existingAnswer) >= 0.82);
+      promptSimilarity >= 0.78 ||
+      (answer === existingAnswer && promptSimilarity >= 0.45) ||
+      (answer.length > 12 && answerSimilarity >= 0.82 && promptSimilarity >= 0.45);
   });
 }
 
