@@ -87,6 +87,83 @@ For the Kaggle demo, use one of these:
 
 The web app stores learner memory in SQLite on the Render disk. The model endpoint provides intelligence; SQLite provides durable memory.
 
+## Cloudflare Free Hosting
+
+Cloudflare is the best free stable-URL path if we accept a Cloudflare-native backend:
+
+- Cloudflare Pages hosts the PWA at a stable `*.pages.dev` URL.
+- Cloudflare Functions handle `/api/*`.
+- Cloudflare D1 stores notes, questions, attempts, and quiz history.
+- `GEMMA_BASE_URL` must still point to a public Gemma/Ollama-compatible endpoint.
+
+This repo includes:
+
+```text
+web/functions/api/[[path]].js
+web/cloudflare/schema.sql
+web/wrangler.toml
+```
+
+### Deploy From Dashboard
+
+1. Open Cloudflare Dashboard.
+2. Go to **Workers & Pages**.
+3. Create a **Pages** project connected to `surpol/Accordian`.
+4. Set root directory to:
+
+   ```text
+   web
+   ```
+
+5. Set build command to blank or:
+
+   ```text
+   :
+   ```
+
+6. Set output directory to:
+
+   ```text
+   public
+   ```
+
+7. Add a D1 database named:
+
+   ```text
+   accordian-ai
+   ```
+
+8. Bind it to the Pages project as:
+
+   ```text
+   DB
+   ```
+
+9. Run the schema in D1:
+
+   ```text
+   web/cloudflare/schema.sql
+   ```
+
+10. Add environment variables:
+
+   ```text
+   GEMMA_BASE_URL=https://your-public-gemma-host.example
+   GEMMA_MODEL=gemma4:e2b
+   ```
+
+11. Deploy.
+
+The hosted app URL will look like:
+
+```text
+https://accordian-ai.pages.dev
+```
+
+### Cloudflare Limitation
+
+Cloudflare cannot run Ollama locally inside Pages or Workers. The deployed app needs an external Gemma-compatible model endpoint. If `GEMMA_BASE_URL` is missing, the Cloudflare function keeps the interface testable with a tiny emergency quiz builder, but the competition demo should use Gemma.
+
 ## Health Check
 
 ```text

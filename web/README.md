@@ -62,6 +62,16 @@ For a domain, deploy this folder to a server that can run Node and write SQLite 
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for Docker and Render deployment.
 
+For free stable hosting, this repo also includes a Cloudflare Pages/Functions/D1 path:
+
+```text
+functions/api/[[path]].js
+cloudflare/schema.sql
+wrangler.toml
+```
+
+Cloudflare gives a stable `pages.dev` URL, while D1 replaces the local SQLite file for the hosted version.
+
 ## Deploy
 
 The repository includes a Render blueprint at the repo root:

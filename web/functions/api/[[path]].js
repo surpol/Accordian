@@ -1,0 +1,591 @@
+const JSON_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+  "access-control-allow-headers": "content-type"
+};
+
+export async function onRequest(context) {
+  const { request, env } = context;
+  if (request.method === "OPTIONS") return json({});
+  const url = new URL(request.url);
+  const path = `/${(context.params.path || []).join("/")}`;
+
+  try {
+    if (!env.DB) return json({ error: "Cloudflare D1 binding DB is missing." }, 500);
+    await ensureSchema(env.DB);
+
+    if (request.method === "GET" && path === "/health") {
+      return json({
+        ok: true,
+        mode: "cloudflare",
+        model: env.GEMMA_MODEL || "gemma4:e2b",
+        database: "Cloudflare D1"
+      });
+    }
+
+    if (request.method === "GET" && path === "/notes") {
+      return json({ notes: await listNotes(env.DB) });
+    }
+
+    if (request.method === "POST" && path === "/notes") {
+      const body = await readJSON(request);
+      const note = await createNote(env, body.title, body.body, body.sourceType || "text");
+      return json({ note, nextQuiz: { status: note.queuedQuizCount > 0 ? "ready" : "preparing", saved: note.questionCount } }, 201);
+    }
+
+    if (request.method === "POST" && path === "/notes/shape") {
+      const body = await readJSON(request);
+      const shaped = await shapeNote(env, body.title, body.body, body.sourceType || "text");
+      return json({ note: shaped });
+    }
+
+    if (request.method === "GET" && path === "/wiki/search") {
+      const query = String(url.searchParams.get("q") || "").trim();
+      if (query.length < 2) return json({ error: "Search needs at least 2 characters." }, 400);
+      return json({ results: await searchWikipedia(query) });
+    }
+
+    if (request.method === "POST" && path === "/wiki/import") {
+      const body = await readJSON(request);
+      const article = await wikipediaArticle(body.title);
+      const note = await createNote(env, article.title, article.text, "wikipedia");
+      return json({ note, nextQuiz: { status: note.queuedQuizCount > 0 ? "ready" : "preparing", saved: note.questionCount } }, 201);
+    }
+
+    if (request.method === "GET" && path === "/quizzes") {
+      return json({ sessions: await allSessions(env.DB) });
+    }
+
+    const sessionMatch = path.match(/^\/quiz-sessions\/([^/]+)$/);
+    if (request.method === "GET" && sessionMatch) {
+      const session = await sessionDetail(env.DB, sessionMatch[1]);
+      if (!session) return json({ error: "Session not found." }, 404);
+      return json({ session });
+    }
+
+    const focusMatch = path.match(/^\/notes\/([^/]+)\/focus-options$/);
+    if (request.method === "GET" && focusMatch) {
+      return json({ options: await focusOptions(env.DB, focusMatch[1]) });
+    }
+
+    const noteMatch = path.match(/^\/notes\/([^/]+)$/);
+    if (noteMatch && (request.method === "PUT" || request.method === "PATCH")) {
+      const body = await readJSON(request);
+      const note = await updateNote(env, noteMatch[1], body.title, body.body, body.sourceType || "text");
+      return json({ note, nextQuiz: { status: note.queuedQuizCount > 0 ? "ready" : "preparing", saved: note.questionCount } });
+    }
+
+    if (noteMatch && request.method === "DELETE") {
+      await deleteNote(env.DB, noteMatch[1]);
+      return json({ ok: true });
+    }
+
+    const buildMatch = path.match(/^\/notes\/([^/]+)\/build$/);
+    if (buildMatch && request.method === "POST") {
+      const note = await ensureQuestions(env, buildMatch[1]);
+      return json({ note, nextQuiz: { status: note.queuedQuizCount > 0 ? "ready" : "preparing", saved: note.questionCount } }, 202);
+    }
+
+    const quizMatch = path.match(/^\/notes\/([^/]+)\/quiz$/);
+    if (quizMatch && request.method === "GET") {
+      return json(await startQuiz(env, quizMatch[1], url.searchParams.get("focus") || ""));
+    }
+
+    if (quizMatch && request.method === "POST") {
+      const body = await readJSON(request);
+      return json(await submitQuiz(env, quizMatch[1], body.answers || []));
+    }
+
+    if (request.method === "POST" && path === "/actions") {
+      const body = await readJSON(request);
+      await env.DB.prepare(`
+        INSERT INTO user_actions (id, note_id, action_type, object_type, object_id, payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        crypto.randomUUID(),
+        body.noteId || null,
+        String(body.actionType || "ui.action"),
+        String(body.objectType || ""),
+        String(body.objectId || ""),
+        JSON.stringify(body.payload || {}),
+        now()
+      ).run();
+      return json({ ok: true }, 201);
+    }
+
+    if (request.method === "GET" && path === "/backup") {
+      return json({ exportedAt: Date.now(), notes: await listNotes(env.DB), sessions: await allSessions(env.DB) });
+    }
+
+    if (request.method === "POST" && path === "/backup/restore") {
+      return json({ ok: false, error: "Cloudflare restore is not implemented yet." }, 501);
+    }
+
+    return json({ error: "Not found." }, 404);
+  } catch (error) {
+    return json({ error: error.message || "Server error." }, 500);
+  }
+}
+
+function json(payload, status = 200) {
+  return new Response(JSON.stringify(payload), { status, headers: JSON_HEADERS });
+}
+
+async function readJSON(request) {
+  try {
+    return await request.json();
+  } catch {
+    return {};
+  }
+}
+
+function now() {
+  return Date.now() / 1000;
+}
+
+async function ensureSchema(db) {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '', source_type TEXT NOT NULL DEFAULT 'text', status TEXT NOT NULL DEFAULT 'ready', created_at REAL NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS questions (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, topic TEXT NOT NULL, subtopic TEXT NOT NULL, prompt TEXT NOT NULL, answer TEXT NOT NULL, choices TEXT NOT NULL, understanding_score REAL NOT NULL DEFAULT 0, created_at REAL NOT NULL, last_seen_at REAL)`,
+    `CREATE TABLE IF NOT EXISTS quiz_queue (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready', question_ids TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, consumed_at REAL)`,
+    `CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, question_id TEXT NOT NULL, response TEXT NOT NULL, answer TEXT NOT NULL, score REAL NOT NULL, feedback TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS quiz_sessions (id TEXT PRIMARY KEY, note_id TEXT NOT NULL, score REAL NOT NULL, attempt_ids TEXT NOT NULL DEFAULT '[]', created_at REAL NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS user_actions (id TEXT PRIMARY KEY, note_id TEXT, action_type TEXT NOT NULL, object_type TEXT NOT NULL DEFAULT '', object_id TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL)`
+  ];
+  for (const statement of statements) await db.prepare(statement).run();
+}
+
+async function listNotes(db) {
+  const rows = await db.prepare(`
+    SELECT
+      n.*,
+      COUNT(DISTINCT q.id) AS question_count,
+      COUNT(DISTINCT CASE WHEN qq.state = 'ready' THEN qq.id END) AS queued_quiz_count,
+      COUNT(DISTINCT a.id) AS attempt_count,
+      AVG(a.score) AS average_score
+    FROM notes n
+    LEFT JOIN questions q ON q.note_id = n.id
+    LEFT JOIN quiz_queue qq ON qq.note_id = n.id
+    LEFT JOIN attempts a ON a.note_id = n.id
+    GROUP BY n.id
+    ORDER BY n.created_at DESC
+  `).all();
+  return rows.results.map(noteDTO);
+}
+
+async function noteSummary(db, noteId) {
+  const row = await db.prepare(`
+    SELECT
+      n.*,
+      COUNT(DISTINCT q.id) AS question_count,
+      COUNT(DISTINCT CASE WHEN qq.state = 'ready' THEN qq.id END) AS queued_quiz_count,
+      COUNT(DISTINCT a.id) AS attempt_count,
+      AVG(a.score) AS average_score
+    FROM notes n
+    LEFT JOIN questions q ON q.note_id = n.id
+    LEFT JOIN quiz_queue qq ON qq.note_id = n.id
+    LEFT JOIN attempts a ON a.note_id = n.id
+    WHERE n.id = ?
+    GROUP BY n.id
+  `).bind(noteId).first();
+  return row ? noteDTO(row) : null;
+}
+
+function noteDTO(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    summary: row.summary || "",
+    sourceType: row.source_type || "text",
+    status: row.status || "ready",
+    createdAt: Number(row.created_at || 0),
+    sectionCount: 0,
+    questionCount: Number(row.question_count || 0),
+    queuedQuizCount: Number(row.queued_quiz_count || 0),
+    attemptCount: Number(row.attempt_count || 0),
+    averageScore: Number(row.average_score || 0)
+  };
+}
+
+async function createNote(env, title, body, sourceType = "text") {
+  const cleanBody = String(body || "").trim();
+  if (!cleanBody) throw new Error("Note text is required.");
+  const id = crypto.randomUUID();
+  const cleanTitle = String(title || "Untitled Note").trim() || "Untitled Note";
+  const summary = await summarizeNote(env, cleanTitle, cleanBody);
+  await env.DB.prepare(`
+    INSERT INTO notes (id, title, body, summary, source_type, status, created_at)
+    VALUES (?, ?, ?, ?, ?, 'ready', ?)
+  `).bind(id, cleanTitle, cleanBody, summary, String(sourceType || "text"), now()).run();
+  await ensureQuestions(env, id);
+  return noteSummary(env.DB, id);
+}
+
+async function updateNote(env, noteId, title, body, sourceType = "text") {
+  const cleanBody = String(body || "").trim();
+  if (!cleanBody) throw new Error("Note text is required.");
+  const cleanTitle = String(title || "Untitled Note").trim() || "Untitled Note";
+  const summary = await summarizeNote(env, cleanTitle, cleanBody);
+  await env.DB.prepare(`UPDATE notes SET title = ?, body = ?, summary = ?, source_type = ?, status = 'ready' WHERE id = ?`)
+    .bind(cleanTitle, cleanBody, summary, String(sourceType || "text"), noteId)
+    .run();
+  await env.DB.prepare(`DELETE FROM questions WHERE note_id = ?`).bind(noteId).run();
+  await env.DB.prepare(`DELETE FROM quiz_queue WHERE note_id = ?`).bind(noteId).run();
+  await ensureQuestions(env, noteId);
+  return noteSummary(env.DB, noteId);
+}
+
+async function deleteNote(db, noteId) {
+  for (const table of ["attempts", "quiz_sessions", "quiz_queue", "questions", "notes"]) {
+    await db.prepare(`DELETE FROM ${table} WHERE ${table === "notes" ? "id" : "note_id"} = ?`).bind(noteId).run();
+  }
+}
+
+async function ensureQuestions(env, noteId) {
+  const existing = await env.DB.prepare(`SELECT COUNT(*) AS count FROM questions WHERE note_id = ?`).bind(noteId).first();
+  if (Number(existing?.count || 0) === 0) {
+    const note = await noteSummary(env.DB, noteId);
+    const questions = await generateQuestions(env, note);
+    for (const question of questions) await insertQuestion(env.DB, noteId, question);
+  }
+  await queueQuiz(env.DB, noteId);
+  return noteSummary(env.DB, noteId);
+}
+
+async function insertQuestion(db, noteId, question) {
+  const choices = normalizeChoices(question.answer, question.choices);
+  await db.prepare(`
+    INSERT INTO questions (id, note_id, topic, subtopic, prompt, answer, choices, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    crypto.randomUUID(),
+    noteId,
+    String(question.topic || "Core Ideas").slice(0, 80),
+    String(question.subtopic || "Understanding").slice(0, 80),
+    String(question.prompt || "").slice(0, 400),
+    String(question.answer || "").slice(0, 240),
+    JSON.stringify(choices),
+    now()
+  ).run();
+}
+
+async function queueQuiz(db, noteId, focus = "") {
+  const ready = await db.prepare(`SELECT id FROM quiz_queue WHERE note_id = ? AND state = 'ready' LIMIT 1`).bind(noteId).first();
+  if (ready) return;
+  const rows = await db.prepare(`
+    SELECT * FROM questions
+    WHERE note_id = ?
+      AND (? = '' OR topic = ? OR subtopic = ?)
+    ORDER BY COALESCE(understanding_score, 0) ASC, COALESCE(last_seen_at, 0) ASC, RANDOM()
+    LIMIT 8
+  `).bind(noteId, focus, focus, focus).all();
+  const ids = rows.results.map((row) => row.id);
+  if (ids.length === 0) return;
+  await db.prepare(`
+    INSERT INTO quiz_queue (id, note_id, state, question_ids, summary, created_at)
+    VALUES (?, ?, 'ready', ?, 'Quiz prepared from Cloudflare D1 memory.', ?)
+  `).bind(crypto.randomUUID(), noteId, JSON.stringify(ids), now()).run();
+}
+
+async function startQuiz(env, noteId, focus = "") {
+  if (focus) {
+    await env.DB.prepare(`DELETE FROM quiz_queue WHERE note_id = ? AND state = 'ready'`).bind(noteId).run();
+    await queueQuiz(env.DB, noteId, focus);
+  }
+  await ensureQuestions(env, noteId);
+  let queued = await env.DB.prepare(`SELECT * FROM quiz_queue WHERE note_id = ? AND state = 'ready' ORDER BY created_at LIMIT 1`).bind(noteId).first();
+  if (!queued) return { questions: [], nextQuiz: { status: "preparing", saved: 0 } };
+  let ids = [];
+  try {
+    ids = JSON.parse(queued.question_ids || "[]");
+  } catch {
+    ids = [];
+  }
+  const questions = [];
+  for (const id of ids) {
+    const row = await env.DB.prepare(`SELECT * FROM questions WHERE id = ? AND note_id = ?`).bind(id, noteId).first();
+    if (row) questions.push(questionDTO(row));
+  }
+  await env.DB.prepare(`UPDATE quiz_queue SET state = 'consumed', consumed_at = ? WHERE id = ?`).bind(now(), queued.id).run();
+  await env.DB.prepare(`UPDATE questions SET last_seen_at = ? WHERE id IN (${ids.map(() => "?").join(",") || "NULL"})`).bind(now(), ...ids).run();
+  return { questions, nextQuiz: null, queue: { id: queued.id, reason: "cloudflare", summary: queued.summary } };
+}
+
+function questionDTO(row) {
+  return {
+    id: row.id,
+    variantId: row.id,
+    deliveryType: "multiple_choice",
+    topic: row.topic,
+    subtopic: row.subtopic,
+    assessmentAngle: "recall",
+    prompt: row.prompt,
+    answer: row.answer,
+    choices: normalizeChoices(row.answer, safeJSON(row.choices, []))
+  };
+}
+
+async function submitQuiz(env, noteId, answers) {
+  const attemptIds = [];
+  let earned = 0;
+  const details = [];
+  for (const item of answers) {
+    const question = await env.DB.prepare(`SELECT * FROM questions WHERE id = ? AND note_id = ?`).bind(item.questionId, noteId).first();
+    if (!question) continue;
+    const response = String(item.response || "");
+    const score = normalize(response) === normalize(question.answer) ? 1 : 0;
+    earned += score;
+    const feedback = score === 1 ? "Correct." : `Review this idea. Correct answer: ${question.answer}`;
+    const attemptId = crypto.randomUUID();
+    attemptIds.push(attemptId);
+    details.push({
+      id: attemptId,
+      questionId: question.id,
+      topic: question.topic,
+      subtopic: question.subtopic,
+      prompt: question.prompt,
+      response,
+      answer: question.answer,
+      score,
+      feedback
+    });
+    await env.DB.prepare(`
+      INSERT INTO attempts (id, note_id, question_id, response, answer, score, feedback, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(attemptId, noteId, question.id, response, question.answer, score, feedback, now()).run();
+    await env.DB.prepare(`UPDATE questions SET understanding_score = ?, last_seen_at = ? WHERE id = ?`)
+      .bind(score, now(), question.id)
+      .run();
+  }
+  const score = details.length ? earned / details.length : 0;
+  const sessionId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO quiz_sessions (id, note_id, score, attempt_ids, created_at) VALUES (?, ?, ?, ?, ?)`)
+    .bind(sessionId, noteId, score, JSON.stringify(attemptIds), now())
+    .run();
+  await env.DB.prepare(`DELETE FROM quiz_queue WHERE note_id = ? AND state = 'ready'`).bind(noteId).run();
+  await queueQuiz(env.DB, noteId);
+  return {
+    id: sessionId,
+    noteId,
+    score,
+    details,
+    nextQuiz: { status: "ready", saved: details.length },
+    learningEvidence: { summary: "D1 saved this quiz attempt and updated each question's understanding score." }
+  };
+}
+
+async function allSessions(db) {
+  const rows = await db.prepare(`
+    SELECT s.*, n.title AS note_title
+    FROM quiz_sessions s
+    JOIN notes n ON n.id = s.note_id
+    ORDER BY s.created_at DESC
+    LIMIT 100
+  `).all();
+  return rows.results.map((row) => ({
+    id: row.id,
+    noteId: row.note_id,
+    noteTitle: row.note_title,
+    score: Number(row.score || 0),
+    createdAt: Number(row.created_at || 0),
+    attemptCount: safeJSON(row.attempt_ids, []).length
+  }));
+}
+
+async function sessionDetail(db, sessionId) {
+  const session = await db.prepare(`
+    SELECT s.*, n.title AS note_title
+    FROM quiz_sessions s
+    JOIN notes n ON n.id = s.note_id
+    WHERE s.id = ?
+  `).bind(sessionId).first();
+  if (!session) return null;
+  const ids = safeJSON(session.attempt_ids, []);
+  const attempts = [];
+  for (const id of ids) {
+    const row = await db.prepare(`
+      SELECT a.*, q.topic, q.subtopic, q.prompt
+      FROM attempts a
+      LEFT JOIN questions q ON q.id = a.question_id
+      WHERE a.id = ?
+    `).bind(id).first();
+    if (row) attempts.push({
+      id: row.id,
+      topic: row.topic || "Saved Attempt",
+      subtopic: row.subtopic || "Earlier quiz",
+      prompt: row.prompt || "Original question unavailable.",
+      response: row.response,
+      answer: row.answer,
+      score: Number(row.score || 0),
+      feedback: row.feedback || ""
+    });
+  }
+  return {
+    id: session.id,
+    noteId: session.note_id,
+    noteTitle: session.note_title,
+    score: Number(session.score || 0),
+    createdAt: Number(session.created_at || 0),
+    attempts
+  };
+}
+
+async function focusOptions(db, noteId) {
+  const rows = await db.prepare(`
+    SELECT topic, subtopic, COUNT(*) AS question_count
+    FROM questions
+    WHERE note_id = ?
+    GROUP BY topic, subtopic
+    ORDER BY topic, subtopic
+  `).bind(noteId).all();
+  const topics = new Set();
+  const options = [];
+  for (const row of rows.results) {
+    if (!topics.has(row.topic)) {
+      topics.add(row.topic);
+      options.push({ type: "topic", value: row.topic, topic: row.topic, subtopic: "", questionCount: 0 });
+    }
+    options.push({ type: "subtopic", value: row.subtopic, topic: row.topic, subtopic: row.subtopic, questionCount: Number(row.question_count || 0) });
+  }
+  return options;
+}
+
+async function searchWikipedia(query) {
+  const url = new URL("https://en.wikipedia.org/w/api.php");
+  url.search = new URLSearchParams({
+    action: "query",
+    list: "search",
+    srsearch: query,
+    format: "json",
+    origin: "*"
+  }).toString();
+  const payload = await fetch(url).then((response) => response.json());
+  return (payload.query?.search || []).slice(0, 6).map((item) => ({
+    title: item.title,
+    snippet: String(item.snippet || "").replace(/<[^>]+>/g, "")
+  }));
+}
+
+async function wikipediaArticle(title) {
+  const cleanTitle = String(title || "").trim();
+  if (!cleanTitle) throw new Error("Wikipedia title is required.");
+  const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cleanTitle)}`;
+  const payload = await fetch(url, { headers: { accept: "application/json" } }).then((response) => response.json());
+  return {
+    title: payload.title || cleanTitle,
+    text: payload.extract || ""
+  };
+}
+
+async function summarizeNote(env, title, body) {
+  const fallback = String(body || "").split(/\s+/).slice(0, 32).join(" ");
+  const result = await gemmaJSON(env, `
+Summarize this note for a learner in one sentence. Use only the note.
+Return {"summary":"..."}.
+TITLE: ${title}
+NOTE: ${String(body || "").slice(0, 5000)}
+`);
+  return String(result?.summary || fallback || "Accordian will prepare quizzes from this note.").slice(0, 420);
+}
+
+async function shapeNote(env, title, body, sourceType) {
+  const raw = String(body || "").trim();
+  if (!raw) throw new Error("Note text is required.");
+  const result = await gemmaJSON(env, `
+Shape this raw note for quiz generation. Use only the provided text. Return JSON:
+{"title":"short title","body":"clear structured note","feedback":["what improved","what would help quizzes"]}
+SOURCE_TYPE: ${sourceType}
+TITLE: ${title || "Untitled Note"}
+NOTE: ${raw.slice(0, 8000)}
+`);
+  return {
+    title: String(result?.title || title || "Untitled Note"),
+    body: String(result?.body || raw),
+    feedback: Array.isArray(result?.feedback) ? result.feedback.slice(0, 3).map(String) : ["Structured the note for quiz generation."]
+  };
+}
+
+async function generateQuestions(env, note) {
+  const target = note.body.split(/\s+/).length < 120 ? 4 : 8;
+  const result = await gemmaJSON(env, `
+Create ${target} high-quality multiple-choice quiz questions from this note.
+Use only the note. Avoid duplicate questions. Return JSON only:
+{"questions":[{"topic":"...","subtopic":"...","prompt":"...","answer":"...","choices":["wrong","correct","wrong","wrong"]}]}
+TITLE: ${note.title}
+NOTE: ${note.body.slice(0, 8000)}
+`);
+  const questions = Array.isArray(result?.questions) ? result.questions : [];
+  if (questions.length) return questions;
+  return emergencyQuestions(note);
+}
+
+async function gemmaJSON(env, prompt) {
+  const baseURL = String(env.GEMMA_BASE_URL || "").replace(/\/$/, "");
+  if (!baseURL || baseURL.includes("127.0.0.1") || baseURL.includes("localhost")) return null;
+  try {
+    const response = await fetch(`${baseURL}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: env.GEMMA_MODEL || "gemma4:e2b",
+        stream: false,
+        think: false,
+        format: "json",
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return JSON.parse(String(payload.message?.content || "{}").match(/\{[\s\S]*\}/)?.[0] || "{}");
+  } catch {
+    return null;
+  }
+}
+
+function emergencyQuestions(note) {
+  const words = note.body.split(/\s+/).filter((word) => word.length > 4);
+  const key = words[0] || note.title;
+  return [{
+    topic: "Core Ideas",
+    subtopic: "Source recall",
+    prompt: `What source is this note about?`,
+    answer: note.title,
+    choices: normalizeChoices(note.title, [note.title, key, "A formula", "A quiz history"])
+  }, {
+    topic: "Core Ideas",
+    subtopic: "Key term",
+    prompt: `Which term appears in this note?`,
+    answer: key,
+    choices: normalizeChoices(key, [key, "database", "triangle", "oxygen"])
+  }];
+}
+
+function normalizeChoices(answer, choices = []) {
+  const seen = new Set();
+  const all = [answer, ...choices].map(String).filter(Boolean).filter((choice) => {
+    const key = normalize(choice);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  while (all.length < 4) all.push(`Option ${all.length + 1}`);
+  return shuffle(all.slice(0, 4));
+}
+
+function shuffle(items) {
+  return items.map((value) => ({ value, sort: Math.random() })).sort((a, b) => a.sort - b.sort).map((item) => item.value);
+}
+
+function normalize(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function safeJSON(value, fallback) {
+  try {
+    return JSON.parse(value || "");
+  } catch {
+    return fallback;
+  }
+}
