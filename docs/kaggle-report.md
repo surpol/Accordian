@@ -1,53 +1,69 @@
-# Accordian.ai - Educating with an Intelligent Interface
+# QuizLoop.ai: A Gemma 4 Learning Loop for Evidence-Based Studying
 
-Subtitle: A local-first Gemma 4 tutor that turns notes into personalized quiz journeys  
-Track: Future of Education
+QuizLoop.ai is an iOS-first, quiz-first tutor for the Future of Education track. The project started from a classroom observation: students like using AI, but chat is often the wrong interface for learning. A student has to know what to ask, how much context to paste, how to test themselves, and how to decide whether they actually understand the material. QuizLoop changes that interaction. The student gives the app learning material, and the system turns it into a guided sequence of checks, feedback, and follow-up quizzes.
 
-## Motivation
+## Product Idea
 
-My name is Surya, and I teach programming at theCoderSchool. In class, I saw students use AI chatbots such as Gemini for learning. The promise was obvious: students were curious, fast, and willing to build. The problem was also obvious: the chat interface often put too much responsibility on the learner. Students asked large questions with short prompts, skipped context, and received answers that were not always connected to what they actually needed to understand.
+The core loop is simple: save source material, let Gemma 4 decompose it, quiz the learner, grade the answers, store the evidence, and build the next quiz from that history. The interface is intentionally small: Home, Library, and History. Library holds notes from pasted text, Wikipedia, books, and math templates. Home keeps one active learning journey in focus. History lets the learner review prior quiz attempts and feedback.
 
-Accordian.ai was built from that observation. The goal is not to make another chatbot. The goal is to use Gemma 4 inside a learning framework where the student does less navigation and the software provides more direction. A student should be able to paste a stream of text from notes, Wikipedia, a book excerpt, or a math template, then move through a guided quiz loop that helps them understand the material.
+This is not a chatbot with quiz features attached. It is a structured learning system that uses Gemma as an intelligence layer inside a bounded product loop.
 
-## Design Approach
+## Technical Implementation
 
-Accordian.ai is a progressive web application with local-first behavior. It is designed to feel like an installable app, while keeping the learner's notes, quiz history, and learning state in SQLite.
+The product architecture is centered on the SwiftUI iOS app. The iOS app owns the learning interface, local SQLite memory, quiz history, and a `GemmaService` boundary that lets the same learning loop run against different Gemma runtimes. A companion progressive web app mirrors the same framework for the public video demo. The deployed web version uses Cloudflare Pages and API functions, while local development can run the same API shape with Node. The memory layer is SQLite-oriented: the iOS/local app uses SQLite directly, and the hosted demo uses Cloudflare D1 for the same relational pattern.
 
-The core interface is quiz-first, not chat-first. Instead of asking the student to invent prompts, Accordian asks the student to provide source material. The system reads that material, generates questions, stores every answer, and prepares the next quiz. This removes friction from the study loop.
+The main objects are:
 
-The product works as a multi-tool learning agent:
+- `Note`: raw source text, title, source type, processing state, and Gemma summary.
+- `Topic`: a high-level area extracted from the note.
+- `Segment`: the smallest learnable concept, anchored to source evidence.
+- `Question`: prompt, answer, choices, type, topic, subtopic, segment reference, importance, difficulty, and canonical concept key.
+- `Attempt`: the learner's response, score, feedback, timestamp, and missed ideas.
+- `QuizSession`: the completed quiz, grouped attempts, score, and note relationship.
+- `UserAction`: interface events that help the system understand how the learner moved through the journey.
 
-- Input Tool: receives pasted notes, Wikipedia text, book excerpts, and structured math templates.
-- Map Tool: uses Gemma 4 to decompose a note into topics, concepts, source evidence, and question objects.
-- Test Tool: uses Gemma 4 to create multiple-choice questions, plausible distractors, and harder follow-up checks.
-- Grade Tool: grades answers against note-backed rubrics and stores matched or missing ideas.
-- Memory Tool: stores notes, questions, attempts, scores, feedback, and quiz history in SQLite.
-- Planner Tool: uses stored learning evidence to prepare the next quiz without requiring the student to choose every step.
+These objects matter because they keep the system from becoming a random worksheet generator. Questions are durable learning objects. Attempts are evidence. Quiz sessions are history. SQLite gives Gemma structured memory instead of asking the model to infer everything from a chat transcript.
 
-The main loop is intentionally simple: add notes, take a quiz, review results, continue. The interface hides most internal complexity so the learner can focus on answering.
+## How Gemma 4 Is Used
 
-## Architecture
+Gemma 4 is used for bounded jobs, not open-ended conversation.
 
-Gemma 4 is the intelligence layer. It reads each note, creates summaries, generates grounded questions, writes answer choices, and prepares follow-up quiz material. The model is bounded by prompts that instruct it to use only supplied notes, return structured JSON, and create questions that can be validated before storage.
+During note processing, Gemma receives only the note text and returns structured JSON: topics, concepts, grounded questions, correct answers, distractors, importance, difficulty, and source references. The prompt asks Gemma to stay inside the note, avoid meta questions, and create checks that actually test understanding.
 
-SQLite is the memory layer. It stores notes, concepts, questions, variants, quiz sessions, attempts, feedback, scores, and user actions. This matters because Accordian should not ask Gemma to start from scratch every time. Each new quiz can include recent performance, weak concepts, mastered concepts, and previously assigned questions.
+During quiz expansion, Gemma receives SQLite context: previous questions, recent attempts, weak concepts, mastered concepts, selected focus, and relevant source excerpts. This lets the next quiz avoid repeats, target weak areas, and introduce adjacent or harder concepts after strong performance.
 
-Ollama is the local model runtime used during development and demo. It runs Gemma 4 locally, which supports Accordian's privacy-first and offline-first direction. The production web version can use a reachable Gemma-compatible endpoint, while the same architecture still treats SQLite as the source of learning memory.
+During grading, multiple-choice answers are graded deterministically. Open-ended answers are routed through Gemma when available, using the saved answer, source evidence, and rubric. The goal is semantic grading: whether the learner expressed the idea, not whether they matched the exact wording.
 
-The UI is a PWA learning surface. The current implementation uses a lightweight Node service with a static web frontend, SQLite storage, and API routes for notes, Wikipedia import, quiz generation, quiz submission, history, and backup/restore. The mobile interface is designed around one active journey at a time.
+Every Gemma output is parsed, validated, and stored before it appears in the UI. The app rejects duplicate prompts, overlapping answer choices, unsupported facts, answer-revealing wording, and weak distractors. This validation layer became one of the most important parts of the project.
 
-## Challenges and Validation
+## Quiz Planner
 
-The hardest challenge was preventing the app from becoming a random worksheet generator. Early versions produced repeated questions, shallow fallback questions, and quiz states that stayed stuck on "preparing." We changed the system so questions are objects connected to concepts, source excerpts, prior attempts, and canonical concept keys.
+QuizLoop builds a starter quiz bank as soon as a note is saved, then expands the bank in the background. The quiz planner selects from stored questions using understanding score, last-seen time, prior misses, difficulty, importance, and optional focus. A perfect quiz should move the learner forward into adjacent or harder concepts. A missed concept should return later in a different form.
 
-We also added validation gates. The app rejects duplicate prompts, overlapping answers, weak distractors, meta questions, and questions that are not grounded in the note. For math topics, Gemma is pushed toward concrete calculation checks instead of vague practice-plan questions. For sports or Wikipedia facts, prompts are repaired when wording could make a cumulative record sound like a single-season record.
+Quiz size is adaptive instead of fixed. Short notes can produce smaller quizzes, while larger notes and books can produce longer sessions. The planner also blocks near-duplicate questions inside the same quiz by comparing canonical concept keys, answer overlap, subtopic repetition, and prompt families.
 
-Testing focused on repeated quiz loops. We used topics such as Photosynthesis, Java basics, Baltimore Ravens, Cleveland Cavaliers, and math templates. The expected behavior is that a perfect quiz should lead to adjacent or harder material, while missed concepts should return in a related form. SQLite stores the evidence that makes this possible.
+## iOS and Google AI Edge Path
 
-## Impact and Next Steps
+The SwiftUI app is the product-ready direction. It uses a `GemmaService` interface so the learning system does not depend on one model runtime. During development, the app can use an Ollama-compatible Gemma endpoint. For offline production use, the same interface is structured to load a bundled Gemma model through the Google AI Edge / MediaPipe runtime path.
 
-Accordian.ai addresses a real classroom problem: students often need structure more than open-ended AI conversation. The app turns raw text into a learning journey where progress is measured through evidence, not vibes. It can help students study notes, articles, book chapters, and math procedures without needing to design their own prompts or study plan.
+This matters because QuizLoop is meant to be a private learning assistant. The native app keeps notes, questions, attempts, scores, and feedback in local SQLite. Gemma receives only the structured context needed for the current learning task. With the on-device runtime path, the phone can become the student's self-contained study system instead of a thin client for a cloud chatbot.
 
-The next step is to strengthen the production model runtime. The local Ollama flow proves the architecture, while a public demo needs a reachable Gemma endpoint or bundled on-device model path. Future work also includes richer answer grading, teacher dashboards, classroom note sets, and multimodal inputs such as worksheet photos or lecture recordings.
+## Validation
 
-The key idea is simple: the note is the source material, Gemma writes and grades the tests, SQLite remembers every run, and the learner keeps moving until understanding improves.
+Testing focused on repeated quiz loops rather than one-off prompts. I used topics such as Photosynthesis, Java basics, LeBron James, Baltimore Ravens, Cleveland Cavaliers, Steve Jobs, Google, clock-hand angle problems, and Pythagorean theorem practice.
+
+The most important bugs were educational, not just technical: repeated questions, shallow distractors, unsupported facts, quiz banks getting stuck, and progress that did not reflect the learner's answers. These failures pushed the system toward canonical concept keys, background quiz expansion, source-grounded validation, history-aware selection, and better quiz reports.
+
+## Impact
+
+QuizLoop.ai reimagines AI tutoring as an evidence loop. The note is the curriculum. Gemma creates and grades bounded checks. SQLite remembers the learner's evidence. The interface keeps the student moving forward without requiring prompt engineering or manual study planning.
+
+For students, this lowers friction. For educators, it suggests a safer classroom pattern: AI can be powerful when it is constrained by source material, structured memory, and measurable learning actions.
+
+## Project Links
+
+- Live demo: https://accordian-bgp.pages.dev
+- Code repository: https://github.com/surpol/Accordian
+- Gemma endpoint used for the web demo: https://gemma-accordian.suryapolina.com
+- Local desktop model: `gemma4:e2b` through Ollama
+- iOS edge path: SwiftUI + SQLite + `GemmaService` + Google AI Edge / MediaPipe runtime path for a bundled Gemma model

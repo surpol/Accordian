@@ -1,6 +1,6 @@
-# Accordian Web
+# QuizLoop Web
 
-Browser version of Accordian for the Kaggle demo.
+Browser version of QuizLoop for the Kaggle video demo.
 
 It keeps the same core architecture as the iOS app:
 
