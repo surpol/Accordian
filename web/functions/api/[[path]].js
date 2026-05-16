@@ -16,7 +16,7 @@ export async function onRequest(context) {
     await ensureSchema(env.DB);
 
     if (request.method === "GET" && path === "/health") {
-      const gemma = gemmaStatus(env);
+      const gemma = await gemmaHealth(env);
       return json({
         ok: true,
         mode: "cloudflare",
@@ -677,6 +677,35 @@ function gemmaStatus(env) {
       ? "Gemma is connected for note shaping, quiz generation, and grading."
       : "Gemma is not connected to this hosted domain. Quiz generation is paused until a model endpoint is configured."
   };
+}
+
+async function gemmaHealth(env) {
+  const status = gemmaStatus(env);
+  if (!status.available) return status;
+  const baseURL = String(env.GEMMA_BASE_URL || "").replace(/\/$/, "");
+  const headers = {};
+  if (env.GEMMA_API_TOKEN) headers["x-accordian-model-token"] = env.GEMMA_API_TOKEN;
+  try {
+    const response = await fetch(`${baseURL}/api/tags`, { headers });
+    if (!response.ok) throw new Error(`model endpoint returned ${response.status}`);
+    const payload = await response.json();
+    const models = Array.isArray(payload.models) ? payload.models : [];
+    const expectedModel = env.GEMMA_MODEL || "gemma4:e2b";
+    const hasModel = models.some((model) => model.name === expectedModel || model.model === expectedModel);
+    return {
+      ...status,
+      available: hasModel,
+      message: hasModel
+        ? "Gemma is connected for note shaping, quiz generation, and grading."
+        : `Gemma endpoint is reachable, but ${expectedModel} is not installed.`
+    };
+  } catch {
+    return {
+      ...status,
+      available: false,
+      message: "Gemma is required but the model endpoint is not answering right now."
+    };
+  }
 }
 
 async function gemmaJSON(env, prompt) {
