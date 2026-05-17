@@ -23,10 +23,12 @@ final class TutorEngine: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var modelReadiness: ModelReadiness = .checking
     @Published private(set) var modelConfiguration: ModelRuntimeConfiguration
+    @Published private(set) var modelDownloadState = ModelDownloadState()
 
     private var gemmaService: GemmaService
     private let conversationStore: ConversationStore
     private let runtimeStore: ModelRuntimeStore
+    private var modelDownloadTask: Task<Void, Never>?
     private var lastQuizBuildAttemptBySourceID: [UUID: Date] = [:]
     private let quizBuildRetryCooldown: TimeInterval = 3 * 60
 
@@ -383,6 +385,36 @@ final class TutorEngine: ObservableObject {
         runtimeStore.save(configuration)
         gemmaService = Self.makeGemmaService(for: configuration)
         await refreshModelReadiness()
+    }
+
+    func downloadDefaultOnDeviceModel() {
+        guard modelDownloadTask == nil else { return }
+
+        modelDownloadState = ModelDownloadState(phase: .downloading(0))
+        modelDownloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel { progress in
+                    await MainActor.run { [weak self] in
+                        self?.modelDownloadState = ModelDownloadState(phase: .downloading(progress))
+                    }
+                }
+
+                await self.updateModelConfiguration(
+                    ModelRuntimeConfiguration(
+                        mode: .onDevice,
+                        serverURLString: self.modelConfiguration.serverURLString,
+                        modelName: downloadedFileName
+                    )
+                )
+                self.modelDownloadState = ModelDownloadState(phase: .installed(downloadedFileName))
+            } catch {
+                self.modelDownloadState = ModelDownloadState(phase: .failed(error.localizedDescription))
+            }
+
+            self.modelDownloadTask = nil
+        }
     }
 
     private func modelReply(

@@ -16,6 +16,7 @@ struct SettingsView: View {
                 ModelStatusCard(
                     readiness: assistant.modelReadiness,
                     configuration: assistant.modelConfiguration,
+                    downloadState: assistant.modelDownloadState,
                     onConfigure: { isShowingModelSetup = true },
                     onRefresh: {
                         Task {
@@ -55,6 +56,10 @@ struct SettingsView: View {
             ModelRuntimeSheet(
                 readiness: assistant.modelReadiness,
                 configuration: assistant.modelConfiguration,
+                downloadState: assistant.modelDownloadState,
+                onDownloadDefaultModel: {
+                    assistant.downloadDefaultOnDeviceModel()
+                },
                 onSave: { configuration in
                     await assistant.updateModelConfiguration(configuration)
                 },
@@ -78,6 +83,7 @@ struct SettingsView: View {
 private struct ModelStatusCard: View {
     let readiness: ModelReadiness
     let configuration: ModelRuntimeConfiguration
+    let downloadState: ModelDownloadState
     let onConfigure: () -> Void
     let onRefresh: () -> Void
 
@@ -98,6 +104,18 @@ private struct ModelStatusCard: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineSpacing(2)
+
+                    if let progress = downloadState.progress {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+
+                            Text("Downloading Gemma \(Int((progress * 100).rounded()))%")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 4)
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -243,6 +261,8 @@ private struct ModelRuntimeSheet: View {
     @Environment(\.dismiss) private var dismiss
     let readiness: ModelReadiness
     let configuration: ModelRuntimeConfiguration
+    let downloadState: ModelDownloadState
+    let onDownloadDefaultModel: () -> Void
     let onSave: (ModelRuntimeConfiguration) async -> Void
     let onCheckAgain: () async -> Void
 
@@ -250,8 +270,6 @@ private struct ModelRuntimeSheet: View {
     @State private var serverURLString: String
     @State private var modelName: String
     @State private var isImportingModel = false
-    @State private var isDownloadingModel = false
-    @State private var modelDownloadProgress: Double?
     @State private var modelImportMessage: String?
     @State private var isShowingManualImport = false
     @FocusState private var focusedField: Field?
@@ -264,11 +282,15 @@ private struct ModelRuntimeSheet: View {
     init(
         readiness: ModelReadiness,
         configuration: ModelRuntimeConfiguration,
+        downloadState: ModelDownloadState,
+        onDownloadDefaultModel: @escaping () -> Void,
         onSave: @escaping (ModelRuntimeConfiguration) async -> Void,
         onCheckAgain: @escaping () async -> Void
     ) {
         self.readiness = readiness
         self.configuration = configuration
+        self.downloadState = downloadState
+        self.onDownloadDefaultModel = onDownloadDefaultModel
         self.onSave = onSave
         self.onCheckAgain = onCheckAgain
         _mode = State(initialValue: configuration.mode)
@@ -359,16 +381,18 @@ private struct ModelRuntimeSheet: View {
                         )
 
                         Button {
-                            downloadDefaultModel()
+                            focusedField = nil
+                            mode = .onDevice
+                            onDownloadDefaultModel()
                         } label: {
                             Label(
-                                isDownloadingModel ? "Downloading Gemma..." : "Download Gemma",
-                                systemImage: isDownloadingModel ? "hourglass" : "arrow.down.circle"
+                                downloadState.isDownloading ? "Downloading Gemma..." : "Download Gemma",
+                                systemImage: downloadState.isDownloading ? "hourglass" : "arrow.down.circle"
                             )
                         }
-                        .disabled(isDownloadingModel)
+                        .disabled(downloadState.isDownloading)
 
-                        if let modelDownloadProgress {
+                        if let modelDownloadProgress = downloadState.progress {
                             VStack(alignment: .leading, spacing: 6) {
                                 ProgressView(value: modelDownloadProgress)
                                     .progressViewStyle(.linear)
@@ -394,6 +418,12 @@ private struct ModelRuntimeSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
+
+                        if let downloadMessage = downloadState.message {
+                            Text(downloadMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
 
                         if let modelImportMessage {
                             Text(modelImportMessage)
@@ -475,6 +505,11 @@ private struct ModelRuntimeSheet: View {
                 }
             }
         }
+        .onChange(of: downloadState.installedModelName) { _, installedModelName in
+            guard let installedModelName else { return }
+            mode = .onDevice
+            modelName = installedModelName
+        }
         .fileImporter(
             isPresented: $isImportingModel,
             allowedContentTypes: [.data],
@@ -535,39 +570,6 @@ private struct ModelRuntimeSheet: View {
             modelImportMessage = "Imported \(importedFileName). Tap Save and Test."
         } catch {
             modelImportMessage = error.localizedDescription
-        }
-    }
-
-    private func downloadDefaultModel() {
-        focusedField = nil
-        isDownloadingModel = true
-        modelDownloadProgress = 0
-        modelImportMessage = "Downloading Gemma. Keep QuizLoop.ai open."
-
-        Task {
-            do {
-                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel { progress in
-                    await MainActor.run {
-                        modelDownloadProgress = progress
-                    }
-                }
-                modelName = downloadedFileName
-                mode = .onDevice
-                modelImportMessage = "Downloaded \(downloadedFileName). Testing now."
-                await onSave(
-                    ModelRuntimeConfiguration(
-                        mode: .onDevice,
-                        serverURLString: serverURLString,
-                        modelName: downloadedFileName
-                    )
-                )
-                modelImportMessage = "Gemma is installed on this iPhone."
-            } catch {
-                modelImportMessage = error.localizedDescription
-            }
-
-            isDownloadingModel = false
-            modelDownloadProgress = nil
         }
     }
 }
