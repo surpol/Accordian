@@ -277,18 +277,22 @@ enum GoogleAIEdgeModelStore {
         return destinationURL.lastPathComponent
     }
 
-    static func downloadDefaultModel() async throws -> String {
+    static func downloadDefaultModel(
+        progress: @escaping @Sendable (Double) async -> Void = { _ in }
+    ) async throws -> String {
         try await downloadModel(
             from: defaultDownloadURL,
             fileName: defaultDownloadName,
-            minimumBytes: defaultDownloadMinimumBytes
+            minimumBytes: defaultDownloadMinimumBytes,
+            progress: progress
         )
     }
 
     static func downloadModel(
         from url: URL,
         fileName: String,
-        minimumBytes: Int64
+        minimumBytes: Int64,
+        progress: @escaping @Sendable (Double) async -> Void = { _ in }
     ) async throws -> String {
         try FileManager.default.createDirectory(
             at: modelsDirectory,
@@ -299,11 +303,47 @@ enum GoogleAIEdgeModelStore {
         request.timeoutInterval = 60 * 30
         request.setValue("QuizLoop.ai iOS", forHTTPHeaderField: "User-Agent")
 
-        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               200..<300 ~= httpResponse.statusCode else {
             throw ModelDownloadError.unreachable
         }
+
+        let expectedBytes = max(httpResponse.expectedContentLength, 0)
+        let temporaryURL = FileManager.default.temporaryDirectory
+            .appending(path: "\(UUID().uuidString)-\(fileName)")
+
+        FileManager.default.createFile(atPath: temporaryURL.path, contents: nil)
+        let fileHandle = try FileHandle(forWritingTo: temporaryURL)
+        defer {
+            try? fileHandle.close()
+            try? FileManager.default.removeItem(at: temporaryURL)
+        }
+
+        var downloadedBytes: Int64 = 0
+        var buffer = Data()
+        buffer.reserveCapacity(64 * 1024)
+
+        for try await byte in bytes {
+            buffer.append(byte)
+
+            if buffer.count >= 64 * 1024 {
+                try fileHandle.write(contentsOf: buffer)
+                downloadedBytes += Int64(buffer.count)
+                buffer.removeAll(keepingCapacity: true)
+
+                if expectedBytes > 0 {
+                    await progress(min(Double(downloadedBytes) / Double(expectedBytes), 0.99))
+                }
+            }
+        }
+
+        if buffer.isEmpty == false {
+            try fileHandle.write(contentsOf: buffer)
+            downloadedBytes += Int64(buffer.count)
+        }
+
+        await progress(1)
 
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: temporaryURL.path)[.size] as? Int64) ?? 0
         guard fileSize >= minimumBytes else {

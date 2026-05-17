@@ -251,7 +251,9 @@ private struct ModelRuntimeSheet: View {
     @State private var modelName: String
     @State private var isImportingModel = false
     @State private var isDownloadingModel = false
+    @State private var modelDownloadProgress: Double?
     @State private var modelImportMessage: String?
+    @State private var isShowingManualImport = false
     @FocusState private var focusedField: Field?
 
     private enum Field {
@@ -366,31 +368,32 @@ private struct ModelRuntimeSheet: View {
                         }
                         .disabled(isDownloadingModel)
 
+                        if let modelDownloadProgress {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ProgressView(value: modelDownloadProgress)
+                                    .progressViewStyle(.linear)
+
+                                Text("\(Int((modelDownloadProgress * 100).rounded()))% downloaded")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 2)
+                        }
+
                         Link(destination: gemmaMobileGuideURL) {
                             Label("Open Gemma Mobile Guide", systemImage: "safari")
                         }
 
                         SetupStepRow(
                             number: 2,
-                            title: "Import the model",
-                            detail: "QuizLoop.ai copies the file into local app storage."
+                            title: "Save and test",
+                            detail: "When the download finishes, QuizLoop.ai sets the model and tests it automatically."
                         )
 
-                        LabeledContent("Model file") {
-                            TextField("gemma-2-2b-it-8bit.bin", text: $modelName)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .multilineTextAlignment(.trailing)
-                                .focused($focusedField, equals: .model)
-                                .accessibilityLabel("On-device model file")
-                        }
-
-                        Button {
-                            focusedField = nil
-                            isImportingModel = true
-                        } label: {
-                            Label("Import Model File", systemImage: "square.and.arrow.down")
-                        }
+                        Text("Selected model: \(modelName)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
 
                         if let modelImportMessage {
                             Text(modelImportMessage)
@@ -398,11 +401,30 @@ private struct ModelRuntimeSheet: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        SetupStepRow(
-                            number: 3,
-                            title: "Save and test",
-                            detail: "When the test passes, QuizLoop.ai can build quizzes without a server."
-                        )
+                        DisclosureGroup("Advanced manual import", isExpanded: $isShowingManualImport) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Use this only if the download is blocked by model terms or you already have a compatible .task or .bin file.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                LabeledContent("Model file") {
+                                    TextField("gemma-4-E2B-it-web.task", text: $modelName)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .multilineTextAlignment(.trailing)
+                                        .focused($focusedField, equals: .model)
+                                        .accessibilityLabel("On-device model file")
+                                }
+
+                                Button {
+                                    focusedField = nil
+                                    isImportingModel = true
+                                } label: {
+                                    Label("Import Model File", systemImage: "folder")
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }
                     }
                 }
 
@@ -519,11 +541,16 @@ private struct ModelRuntimeSheet: View {
     private func downloadDefaultModel() {
         focusedField = nil
         isDownloadingModel = true
+        modelDownloadProgress = 0
         modelImportMessage = "Downloading Gemma. Keep QuizLoop.ai open."
 
         Task {
             do {
-                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel()
+                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel { progress in
+                    await MainActor.run {
+                        modelDownloadProgress = progress
+                    }
+                }
                 modelName = downloadedFileName
                 mode = .onDevice
                 modelImportMessage = "Downloaded \(downloadedFileName). Testing now."
@@ -540,6 +567,7 @@ private struct ModelRuntimeSheet: View {
             }
 
             isDownloadingModel = false
+            modelDownloadProgress = nil
         }
     }
 }
