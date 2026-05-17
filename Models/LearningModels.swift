@@ -719,7 +719,7 @@ struct StudySource: Identifiable, Equatable {
             case .ready:
                 "Ready"
             case .failed:
-                "Needs Model"
+                "Needs Review"
             }
         }
 

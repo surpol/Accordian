@@ -134,8 +134,12 @@ private struct NoteRow: View {
             return source.quizBuildDetail.isEmpty ? "Quiz available. Adding more questions." : source.quizBuildDetail
         }
 
-        if source.quizBuildState == .failed || source.status == .failed || assistant.modelReadiness.isReady == false {
+        if assistant.modelReadiness.isReady == false {
             return "Connect the model to create questions"
+        }
+
+        if source.quizBuildState == .failed || source.status == .failed {
+            return source.quizBuildDetail.isEmpty ? "Could not create questions yet" : source.quizBuildDetail
         }
 
         return "\(wordCount.formatted()) words saved"
@@ -158,8 +162,12 @@ private struct NoteRow: View {
             return "Ready"
         }
 
-        if source.quizBuildState == .failed || source.status == .failed || assistant.modelReadiness.isReady == false {
+        if assistant.modelReadiness.isReady == false {
             return "Needs Model"
+        }
+
+        if source.quizBuildState == .failed || source.status == .failed {
+            return "Try Again"
         }
 
         return "No Questions"
