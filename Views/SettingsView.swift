@@ -170,6 +170,75 @@ private struct SettingsRow: View {
     }
 }
 
+private struct ModelSetupPathButton: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.headline)
+                    .foregroundStyle(isSelected ? .white : .teal)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        isSelected ? Color.teal : Color.teal.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(2)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? .teal : .secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
+    }
+}
+
+private struct SetupStepRow: View {
+    let number: Int
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(Color.teal, in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(2)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+}
+
 private struct ModelRuntimeSheet: View {
     @Environment(\.dismiss) private var dismiss
     let readiness: ModelReadiness
@@ -208,17 +277,47 @@ private struct ModelRuntimeSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Picker("Runtime", selection: $mode) {
-                        Text(ModelRuntimeConfiguration.Mode.localServer.title).tag(ModelRuntimeConfiguration.Mode.localServer)
-                        Text(ModelRuntimeConfiguration.Mode.onDevice.title).tag(ModelRuntimeConfiguration.Mode.onDevice)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Set Up Gemma")
+                            .font(.title2.weight(.semibold))
+
+                        Text("QuizLoop.ai needs a local Gemma model before it can read notes, create quizzes, or grade answers.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.segmented)
+                    .padding(.vertical, 4)
                 } footer: {
-                    Text(runtimeHelpText)
+                    Text("Choose the path that matches how you want to run Gemma.")
+                }
+
+                Section("Choose setup") {
+                    ModelSetupPathButton(
+                        title: "Use This iPhone Offline",
+                        detail: "Import a Google AI Edge compatible Gemma model file and keep learning fully on device.",
+                        systemImage: "iphone",
+                        isSelected: mode == .onDevice
+                    ) {
+                        mode = .onDevice
+                    }
+
+                    ModelSetupPathButton(
+                        title: "Connect to My Computer",
+                        detail: "Use Ollama on your Mac while developing or testing over the same Wi-Fi.",
+                        systemImage: "desktopcomputer",
+                        isSelected: mode == .localServer
+                    ) {
+                        mode = .localServer
+                    }
                 }
 
                 if mode == .localServer {
-                    Section("Gemma Endpoint") {
+                    Section("Connect to Mac") {
+                        SetupStepRow(
+                            number: 1,
+                            title: "Run Gemma with Ollama",
+                            detail: "Start Ollama on your Mac and keep both devices on the same Wi-Fi."
+                        )
+
                         LabeledContent("Endpoint") {
                             TextField("http://192.168.1.10:11434", text: $serverURLString)
                                 .textInputAutocapitalization(.never)
@@ -228,6 +327,12 @@ private struct ModelRuntimeSheet: View {
                                 .focused($focusedField, equals: .server)
                                 .accessibilityLabel("Gemma endpoint")
                         }
+
+                        SetupStepRow(
+                            number: 2,
+                            title: "Choose the model",
+                            detail: "Use the same model name installed in Ollama."
+                        )
 
                         LabeledContent("Model") {
                             TextField("gemma4:e2b", text: $modelName)
@@ -243,7 +348,23 @@ private struct ModelRuntimeSheet: View {
                         }
                     }
                 } else {
-                    Section("On-device Gemma") {
+                    Section("Use This iPhone Offline") {
+                        SetupStepRow(
+                            number: 1,
+                            title: "Get a compatible model",
+                            detail: "Download a Google AI Edge / MediaPipe compatible Gemma model file to Files."
+                        )
+
+                        Link(destination: gemmaMobileGuideURL) {
+                            Label("Open Gemma Mobile Guide", systemImage: "safari")
+                        }
+
+                        SetupStepRow(
+                            number: 2,
+                            title: "Import the model",
+                            detail: "QuizLoop.ai copies the file into local app storage."
+                        )
+
                         LabeledContent("Model file") {
                             TextField("gemma-2-2b-it-8bit.bin", text: $modelName)
                                 .textInputAutocapitalization(.never)
@@ -266,9 +387,11 @@ private struct ModelRuntimeSheet: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("Import or bundle a Google AI Edge compatible Gemma .bin or .task model. QuizLoop.ai will use SQLite memory locally and run inference through MediaPipe/LiteRT on device.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                        SetupStepRow(
+                            number: 3,
+                            title: "Save and test",
+                            detail: "When the test passes, QuizLoop.ai can build quizzes without a server."
+                        )
                     }
                 }
 
@@ -334,6 +457,10 @@ private struct ModelRuntimeSheet: View {
             serverURLString: serverURLString,
             modelName: modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? configuration.modelName : modelName
         )
+    }
+
+    private var gemmaMobileGuideURL: URL {
+        URL(string: "https://ai.google.dev/gemma/docs/integrations/mobile")!
     }
 
     private var runtimeHelpText: String {
