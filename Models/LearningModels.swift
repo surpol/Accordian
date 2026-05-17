@@ -973,12 +973,15 @@ struct ModelDownloadState: Equatable {
 struct ModelRuntimeConfiguration: Equatable {
     enum Mode: String, CaseIterable {
         case localServer
+        case onDeviceGGUF
         case onDevice
 
         var title: String {
             switch self {
             case .localServer:
                 "Gemma Server"
+            case .onDeviceGGUF:
+                "On-device Gemma"
             case .onDevice:
                 "Google AI Edge"
             }
@@ -1006,8 +1009,8 @@ struct ModelRuntimeConfiguration: Equatable {
     }
 
     static let `default` = ModelRuntimeConfiguration(
-        mode: .localServer,
+        mode: .onDeviceGGUF,
         serverURLString: "http://192.168.1.37:11434",
-        modelName: "gemma4:e2b"
+        modelName: GGUFGemmaModelStore.defaultDownloadName
     )
 }

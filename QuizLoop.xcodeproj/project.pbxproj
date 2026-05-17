@@ -24,6 +24,7 @@
 		1A0000010000000000000018 /* QuizzesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001019 /* QuizzesView.swift */; };
 		1A0000010000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000010000000000001020 /* Assets.xcassets */; };
 		5D5A21C7505EFB6718F640F8 /* Pods_QuizLoop.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3E8E47DD66BA4F4D0CC281F7 /* Pods_QuizLoop.framework */; };
+		2B0000010000000000000001 /* LlamaSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 2B0000010000000000009002 /* LlamaSwift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -56,6 +57,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5D5A21C7505EFB6718F640F8 /* Pods_QuizLoop.framework in Frameworks */,
+				2B0000010000000000000001 /* LlamaSwift in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -171,6 +173,9 @@
 			dependencies = (
 			);
 			name = QuizLoop;
+			packageProductDependencies = (
+				2B0000010000000000009002 /* LlamaSwift */,
+			);
 			productName = QuizLoop;
 			productReference = 1A0000010000000000001000 /* QuizLoop.app */;
 			productType = "com.apple.product-type.application";
@@ -199,6 +204,9 @@
 				Base,
 			);
 			mainGroup = 1A0000010000000000003001;
+			packageReferences = (
+				2B0000010000000000009001 /* XCRemoteSwiftPackageReference "llama.swift" */,
+			);
 			productRefGroup = 1A0000010000000000003003 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -458,6 +466,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		2B0000010000000000009001 /* XCRemoteSwiftPackageReference "llama.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mattt/llama.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9193.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2B0000010000000000009002 /* LlamaSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2B0000010000000000009001 /* XCRemoteSwiftPackageReference "llama.swift" */;
+			productName = LlamaSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 1A0000010000000000005001 /* Project object */;
 }

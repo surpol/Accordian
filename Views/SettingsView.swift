@@ -74,6 +74,8 @@ struct SettingsView: View {
         switch assistant.modelConfiguration.mode {
         case .localServer:
             assistant.modelConfiguration.modelName
+        case .onDeviceGGUF:
+            assistant.modelConfiguration.modelName
         case .onDevice:
             assistant.modelConfiguration.modelName
         }
@@ -96,7 +98,7 @@ private struct ModelStatusCard: View {
                     .frame(width: 34, height: 34)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(configuration.mode == .onDevice ? "Google AI Edge" : configuration.modelName)
+                    Text(configuration.mode == .localServer ? configuration.modelName : configuration.mode.title)
                         .font(.headline)
                         .lineLimit(1)
 
@@ -318,11 +320,12 @@ private struct ModelRuntimeSheet: View {
                 Section("Choose setup") {
                     ModelSetupPathButton(
                         title: "Use This iPhone Offline",
-                        detail: "Import a Google AI Edge compatible Gemma model file and keep learning fully on device.",
+                        detail: "Download a Gemma 4 GGUF model and keep quizzes fully on this iPhone.",
                         systemImage: "iphone",
-                        isSelected: mode == .onDevice
+                        isSelected: mode == .onDeviceGGUF
                     ) {
-                        mode = .onDevice
+                        mode = .onDeviceGGUF
+                        modelName = GGUFGemmaModelStore.defaultDownloadName
                     }
 
                     ModelSetupPathButton(
@@ -376,8 +379,8 @@ private struct ModelRuntimeSheet: View {
                     Section("Use This iPhone Offline") {
                         SetupStepRow(
                             number: 1,
-                            title: "Get a compatible model",
-                            detail: "Download Gemma into QuizLoop.ai, or open the model page if the host asks you to accept terms first."
+                            title: "Download Gemma 4",
+                            detail: "QuizLoop.ai uses a GGUF model through llama.cpp so it can run without your Mac."
                         )
 
                         if selectedModelIsDownloaded, downloadState.isDownloading == false {
@@ -386,7 +389,8 @@ private struct ModelRuntimeSheet: View {
                         } else {
                             Button {
                                 focusedField = nil
-                                mode = .onDevice
+                                mode = .onDeviceGGUF
+                                modelName = GGUFGemmaModelStore.defaultDownloadName
                                 onDownloadDefaultModel()
                             } label: {
                                 Label(
@@ -407,10 +411,6 @@ private struct ModelRuntimeSheet: View {
                                     .foregroundStyle(.secondary)
                             }
                             .padding(.vertical, 2)
-                        }
-
-                        Link(destination: gemmaMobileGuideURL) {
-                            Label("Open Gemma Mobile Guide", systemImage: "safari")
                         }
 
                         SetupStepRow(
@@ -438,12 +438,12 @@ private struct ModelRuntimeSheet: View {
 
                         DisclosureGroup("Advanced manual import", isExpanded: $isShowingManualImport) {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Use this only if the download is blocked by model terms or you already have a compatible .task or .bin file.")
+                                Text("Use this only if you already have a compatible Gemma 4 .gguf file.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
 
                                 LabeledContent("Model file") {
-                                    TextField("gemma-4-E2B-it-web.task", text: $modelName)
+                                    TextField(GGUFGemmaModelStore.defaultDownloadName, text: $modelName)
                                         .textInputAutocapitalization(.never)
                                         .autocorrectionDisabled()
                                         .multilineTextAlignment(.trailing)
@@ -512,7 +512,7 @@ private struct ModelRuntimeSheet: View {
         }
         .onChange(of: downloadState.installedModelName) { _, installedModelName in
             guard let installedModelName else { return }
-            mode = .onDevice
+            mode = .onDeviceGGUF
             modelName = installedModelName
         }
         .fileImporter(
@@ -532,18 +532,23 @@ private struct ModelRuntimeSheet: View {
         )
     }
 
-    private var gemmaMobileGuideURL: URL {
-        URL(string: "https://ai.google.dev/gemma/docs/integrations/mobile")!
-    }
-
     private var selectedModelIsDownloaded: Bool {
-        GoogleAIEdgeModelStore.isModelAvailable(named: modelName)
+        switch mode {
+        case .localServer:
+            false
+        case .onDeviceGGUF:
+            GGUFGemmaModelStore.isModelAvailable(named: modelName)
+        case .onDevice:
+            GoogleAIEdgeModelStore.isModelAvailable(named: modelName)
+        }
     }
 
     private var runtimeHelpText: String {
         switch mode {
         case .localServer:
             "Use Gemma through a local endpoint while the bundled on-device runtime is being prepared. QuizLoop.ai does not generate quizzes without a model."
+        case .onDeviceGGUF:
+            "Use a local Gemma 4 GGUF model through llama.cpp. This is the production offline path."
         case .onDevice:
             "Use Google AI Edge with a bundled Gemma model file. This is the target production offline mode."
         }

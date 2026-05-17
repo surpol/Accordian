@@ -366,9 +366,11 @@ final class TutorEngine: ObservableObject {
                 modelReadiness = .modelMissing(gemmaService.modelName)
             }
         } catch {
-            if modelConfiguration.mode == .onDevice {
+            if modelConfiguration.mode == .onDevice || modelConfiguration.mode == .onDeviceGGUF {
                 if case GemmaServiceError.aiEdgeRuntimeUnavailable = error {
                     modelReadiness = .appleIntelligenceNotEnabled
+                } else if case GemmaServiceError.llamaRuntimeUnavailable = error {
+                    modelReadiness = .deviceNotEligible
                 } else if case GemmaServiceError.modelFileMissing(let model) = error {
                     modelReadiness = .modelMissing(model)
                 } else if case GemmaServiceError.unsupportedModelFormat(let model) = error {
@@ -392,15 +394,15 @@ final class TutorEngine: ObservableObject {
     func downloadDefaultOnDeviceModel() {
         guard modelDownloadTask == nil else { return }
 
-        if GoogleAIEdgeModelStore.isModelAvailable(named: GoogleAIEdgeModelStore.defaultDownloadName) {
-            modelDownloadState = ModelDownloadState(phase: .installed(GoogleAIEdgeModelStore.defaultDownloadName))
+        if GGUFGemmaModelStore.isModelAvailable(named: GGUFGemmaModelStore.defaultDownloadName) {
+            modelDownloadState = ModelDownloadState(phase: .installed(GGUFGemmaModelStore.defaultDownloadName))
             modelDownloadTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.updateModelConfiguration(
                     ModelRuntimeConfiguration(
-                        mode: .onDevice,
+                        mode: .onDeviceGGUF,
                         serverURLString: self.modelConfiguration.serverURLString,
-                        modelName: GoogleAIEdgeModelStore.defaultDownloadName
+                        modelName: GGUFGemmaModelStore.defaultDownloadName
                     )
                 )
                 self.modelDownloadTask = nil
@@ -413,7 +415,7 @@ final class TutorEngine: ObservableObject {
             guard let self else { return }
 
             do {
-                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel { progress in
+                let downloadedFileName = try await GGUFGemmaModelStore.downloadDefaultModel { progress in
                     await MainActor.run { [weak self] in
                         self?.modelDownloadState = ModelDownloadState(phase: .downloading(progress))
                     }
@@ -421,7 +423,7 @@ final class TutorEngine: ObservableObject {
 
                 await self.updateModelConfiguration(
                     ModelRuntimeConfiguration(
-                        mode: .onDevice,
+                        mode: .onDeviceGGUF,
                         serverURLString: self.modelConfiguration.serverURLString,
                         modelName: downloadedFileName
                     )
@@ -505,9 +507,9 @@ final class TutorEngine: ObservableObject {
             return groundedResponse
         } catch {
             await refreshModelReadiness()
-            let message = modelConfiguration.mode == .onDevice
-                ? "Something went wrong with the on-device Gemma runtime. Check that the bundled model is installed."
-                : "I could not reach Gemma. Make sure Ollama is running and the model is installed."
+            let message = modelConfiguration.mode == .localServer
+                ? "I could not reach Gemma. Make sure Ollama is running and the model is installed."
+                : "Something went wrong with the on-device Gemma runtime. Check that the model is installed."
             lastError = error.localizedDescription
             appendTurn(TutorTurn(speaker: .quizLoop, text: message, createdAt: .now))
             isResponding = false
@@ -5448,13 +5450,15 @@ final class TutorEngine: ObservableObject {
         switch configuration.mode {
         case .localServer:
             return OllamaGemmaService(configuration: configuration)
+        case .onDeviceGGUF:
+            return LlamaCppGemmaService(modelFileName: configuration.modelName)
         case .onDevice:
             return GoogleAIEdgeGemmaService(modelFileName: configuration.modelName)
         }
     }
 
     private static func makeOnDeviceFallbackService() -> GemmaService? {
-        GoogleAIEdgeGemmaService(modelFileName: ModelRuntimeConfiguration.default.modelName)
+        LlamaCppGemmaService(modelFileName: ModelRuntimeConfiguration.default.modelName)
     }
 
     private func parseTopics(from response: String, sourceID: UUID) -> [LearningTopic] {
