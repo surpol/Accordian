@@ -257,7 +257,7 @@ h3 {
 }
 
 .learn-grid {
-  max-width: 560px;
+  max-width: 760px;
 }
 
 .panel {
@@ -550,13 +550,41 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 28px;
   display: grid;
-  gap: 22px;
-  padding: 18px;
+  gap: 18px;
+  padding: 22px;
+}
+
+.home-overview {
+  align-items: stretch;
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 260px);
+  min-width: 0;
 }
 
 .home-copy {
+  align-content: start;
   display: grid;
   gap: 10px;
+  min-width: 0;
+}
+
+.home-copy h2 {
+  font-size: clamp(32px, 4vw, 46px);
+  line-height: 1.05;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.home-copy .muted {
+  display: -webkit-box;
+  line-height: 1.42;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
 }
 
 .home-label {
@@ -618,10 +646,13 @@ h3 {
 
 .home-progress {
   background: var(--soft);
-  border-radius: 24px;
+  border-radius: 22px;
+  align-content: end;
   display: grid;
   gap: 8px;
-  padding: 18px;
+  min-height: 150px;
+  min-width: 0;
+  padding: 22px;
 }
 
 .home-progress > div > span {
@@ -653,6 +684,18 @@ h3 {
   flex-direction: column;
   gap: 10px;
   margin: 12px 0 18px;
+}
+
+.home-card > .actions {
+  align-items: center;
+  flex-direction: row;
+  justify-content: flex-start;
+  margin: 0;
+}
+
+.home-card > .actions button {
+  min-width: 164px;
+  width: auto;
 }
 
 .focus-panel > .actions {
@@ -980,6 +1023,38 @@ h3 {
 
 .manual-note-fields[hidden] {
   display: none;
+}
+
+.note-coach-box {
+  background: #e8f0fe;
+  border: 1px solid #aecbfa;
+  border-radius: 18px;
+  color: var(--blue-dark);
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+}
+
+.note-coach-box[hidden] {
+  display: none;
+}
+
+.note-coach-box strong {
+  font-size: 14px;
+}
+
+.note-coach-box ul {
+  color: var(--ink);
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.note-coach-box li {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .source-chooser {
@@ -1325,6 +1400,12 @@ dd {
     padding: 0;
   }
 
+  .home-overview {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: 1fr;
+  }
+
   .home-copy h2 {
     font-size: 27px;
     line-height: 1.08;
@@ -1332,11 +1413,9 @@ dd {
   }
 
   .home-copy .muted {
-    display: -webkit-box;
     font-size: 14px;
-    line-height: 1.42;
-    overflow: hidden;
-    -webkit-box-orient: vertical;
+    max-height: calc(1.38em * 3);
+    min-height: calc(1.38em * 3);
     -webkit-line-clamp: 3;
   }
 
@@ -1347,7 +1426,8 @@ dd {
     display: flex;
     align-items: end;
     gap: 14px;
-    padding: 12px 0 0;
+    min-height: auto;
+    padding: 14px 0 0;
   }
 
   .home-progress > div > span {

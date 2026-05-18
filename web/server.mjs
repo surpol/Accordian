@@ -820,6 +820,57 @@ ${content}
   }
 }
 
+function noteShapePromptFor({ title, body, sourceType }) {
+  const cleanTitle = String(title || "Untitled Note").slice(0, 180);
+  const cleanSourceType = String(sourceType || "text").slice(0, 40);
+  const text = String(body || "").slice(0, 12000);
+  const modeGuidance = isBookSourceType(cleanSourceType)
+    ? `Book notes should be organized into: Book or source, passage/chapter, source text, key ideas, evidence, and what the learner wants to understand. If this is a long pasted book, preserve the source text and add structure around it.`
+    : cleanSourceType === "math"
+      ? `Math notes should be organized into: concept, formulas/rules, worked example, common mistakes, and practice goals. Keep formulas readable as plain text.`
+      : `General notes should be organized into: source text, key ideas, important facts, relationships, and what the learner should be able to explain.`;
+
+  return `
+You are shaping a student's raw note so Accordian.ai can create better quizzes from it.
+Use ONLY the text provided. Do not add outside facts.
+Preserve the user's meaning and important source wording.
+Make the note clearer, more structured, and easier to quiz.
+If the pasted text is already good, keep it mostly intact and add light headings.
+Return valid JSON only.
+
+SOURCE_TYPE: ${cleanSourceType}
+TITLE: ${cleanTitle}
+
+MODE_GUIDANCE:
+${modeGuidance}
+
+Return this exact JSON shape:
+{
+  "title": "short improved title",
+  "body": "improved note text with headings",
+  "feedback": ["short note about what improved", "short note about what would make quizzes better"]
+}
+
+RAW_NOTE:
+${text}
+`;
+}
+
+async function shapeNoteDraft({ title, body, sourceType }) {
+  const result = await gemmaJSON(noteShapePromptFor({ title, body, sourceType }), 90000);
+  const shapedTitle = String(result.title || title || "Untitled Note").trim().slice(0, 180);
+  const shapedBody = String(result.body || body || "").trim();
+  const feedback = Array.isArray(result.feedback)
+    ? result.feedback.map((item) => String(item).trim()).filter(Boolean).slice(0, 3)
+    : [];
+  if (!shapedBody) throw new Error("Gemma did not return shaped note text.");
+  return {
+    title: shapedTitle || "Untitled Note",
+    body: shapedBody,
+    feedback
+  };
+}
+
 function questionTargetFor(text) {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
   if (words < 120) return 8;
@@ -2091,12 +2142,7 @@ async function prepareInitialQuiz(noteId) {
       const backfill = await gemmaJSON(coverageBackfillPromptFor(note, minimum - saved), 90000);
       saved += insertQuestions(noteId, backfill.questions || [], "initial_coverage_backfill");
     }
-    const refreshed = noteSummary(noteId);
-    if (noteNeedsQuestionBackfill(refreshed)) {
-      sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
-    } else {
-      enqueueQuizForNote(noteId, "starter");
-    }
+    enqueueQuizForNote(noteId, "starter");
     recordModelRun({
       noteId,
       task: "initial_quiz_build",
@@ -2130,13 +2176,6 @@ function queueInitialQuiz(noteId) {
   }
   const note = noteSummary(noteId);
   if (!note) return { status: "missing_note", saved: 0 };
-  if (note.questionCount > 0 && noteNeedsQuestionBackfill(note)) {
-    sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
-    return queueNextQuiz(noteId, [], {
-      force: true,
-      reason: "low_question_bank"
-    });
-  }
   if (note.questionCount > 0) {
     const queued = enqueueQuizForNote(noteId, "starter");
     if (queued.status === "empty" || queued.status === "insufficient_viable_questions") {
@@ -2188,10 +2227,11 @@ function startQuiz(noteId) {
     sqlite(`UPDATE notes SET status = 'ready' WHERE id = '${sqlEscape(noteId)}';`);
     note = noteSummary(noteId);
   }
-  if (note.status === "building" || initialBuildInFlight.has(noteId) || expansionInFlight.has(noteId)) {
+  let queuedQuiz = consumeQueuedQuiz(noteId);
+  if (!queuedQuiz && (note.status === "building" || initialBuildInFlight.has(noteId) || expansionInFlight.has(noteId))) {
     return { questions: [], nextQuiz: { status: "preparing", saved: 0 } };
   }
-  if (note.questionCount > 0 && noteNeedsQuestionBackfill(note)) {
+  if (!queuedQuiz && note.questionCount > 0 && noteNeedsQuestionBackfill(note)) {
     sqlite(`DELETE FROM quiz_queue WHERE note_id = '${sqlEscape(noteId)}' AND state = 'ready';`);
     return {
       questions: [],
@@ -2201,7 +2241,6 @@ function startQuiz(noteId) {
       })
     };
   }
-  let queuedQuiz = consumeQueuedQuiz(noteId);
   if (!queuedQuiz) {
     const queued = queueInitialQuiz(noteId);
     if (queued.status === "ready" || queued.status === "already_ready") {
@@ -3178,6 +3217,16 @@ async function handleAPI(request, response, url) {
     });
     queueInitialQuiz(note.id);
     return writeJSON(response, 201, { note: noteSummary(note.id), nextQuiz: { status: "preparing", saved: 0 } });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/notes/shape") {
+    const body = await readJSON(request);
+    const title = String(body.title || "Untitled Note").trim();
+    const text = String(body.body || "").trim();
+    const sourceType = String(body.sourceType || body.source_type || "text").trim();
+    if (!text) return writeJSON(response, 400, { error: "Note text is required." });
+    const shaped = await shapeNoteDraft({ title, body: text, sourceType });
+    return writeJSON(response, 200, { note: shaped });
   }
 
   if (request.method === "POST" && url.pathname === "/api/notes") {

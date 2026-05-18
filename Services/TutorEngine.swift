@@ -1917,7 +1917,6 @@ final class TutorEngine: ObservableObject {
         let savedCount = max(source.quizBuildSavedCount, questions.filter { $0.sourceID == source.id }.count)
         guard source.quizBuildState == .building
                 || isPreparingNextQuiz(for: source.id)
-                || (savedCount > 0 && availableCount == 0 && modelReadiness.isReady)
         else {
             return nil
         }
@@ -3056,10 +3055,7 @@ final class TutorEngine: ObservableObject {
         ) else {
             return
         }
-        guard canAttemptQuizBuild(for: sourceID) || expansionPlan.angleTargets.isEmpty == false else {
-            return
-        }
-
+        print("[QuizLoop][Tutor] Post-quiz expansion queued source=\(source.title) outcome=\(quizOutcome.count) targetNew=\(expansionPlan.targetNewQuestions) current=\(expansionPlan.currentQuestionCount)")
         preparingNextQuizSourceIDs.insert(sourceID)
         lastQuizBuildAttemptBySourceID[sourceID] = .now
         setQuizBuildProgress(
@@ -3343,9 +3339,12 @@ final class TutorEngine: ObservableObject {
             clearQuizBuildProgress(for: source.id)
         }
 
-        guard isOnDeviceLiteRTLM == false else {
-            print("[QuizLoop][Tutor] Skipping heavy quiz expansion on-device source=\(source.title)")
-            return 0
+        if isOnDeviceLiteRTLM {
+            return await expandOnDeviceQuestionBankAfterQuiz(
+                source: source,
+                quizOutcome: quizOutcome,
+                expansionPlan: expansionPlan
+            )
         }
 
         let memoryContext = quizMemoryContextJSON(
@@ -3394,7 +3393,14 @@ final class TutorEngine: ObservableObject {
                 progress: 0.82,
                 detail: "Saving new questions."
             )
-            let addedCount = appendFreshQuestions(freshQuestions, sourceID: source.id)
+            var addedCount = appendFreshQuestions(freshQuestions, sourceID: source.id)
+            if addedCount == 0, freshQuestions.isEmpty == false {
+                addedCount = appendFreshQuestions(
+                    freshQuestions,
+                    sourceID: source.id,
+                    allowSemanticOverlap: true
+                )
+            }
             let savedCount = questions.filter { $0.sourceID == source.id }.count
             let bankPlan = questionBankPlan(for: source)
             updateQuizBuildState(
@@ -3423,6 +3429,104 @@ final class TutorEngine: ObservableObject {
                 stage: .expanding
             )
             clearQuizBuildProgress(for: source.id)
+            updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .failed)
+            return 0
+        }
+    }
+
+    @discardableResult
+    private func expandOnDeviceQuestionBankAfterQuiz(
+        source: StudySource,
+        quizOutcome: [(question: LearningQuestion, attempt: QuestionAttempt)],
+        expansionPlan: QuestionExpansionPlan
+    ) async -> Int {
+        let targetCount = min(max(expansionPlan.targetNewQuestions, minimumFreshQuizCount), minimumFreshQuizCount)
+        let prompt = onDeviceNextQuizExpansionPrompt(
+            source: source,
+            quizOutcome: quizOutcome,
+            expansionPlan: expansionPlan,
+            targetCount: targetCount
+        )
+
+        setQuizBuildProgress(
+            source.id,
+            stage: .expanding,
+            progress: 0.35,
+            detail: "Gemma is preparing the next quiz."
+        )
+        print("[QuizLoop][Tutor] On-device quiz expansion source=\(source.title) id=\(source.id) promptChars=\(prompt.count)")
+
+        do {
+            let response = try await withTimeout(seconds: 90) {
+                try await self.modelReply(to: [
+                    GemmaMessage(
+                        role: "system",
+                        content: """
+                        You create fresh multiple-choice quiz questions for QuizLoop.ai.
+                        Return valid JSON only. Use only the supplied note excerpt and memory.
+                        """
+                    ),
+                    GemmaMessage(role: "user", content: prompt)
+                ], timeout: 90, taskType: "quiz_generation", promptVersion: "on_device_next_quiz.v1")
+            }
+
+            let expansion = try parseFreshQuestionExpansion(from: response)
+            let freshQuestions = materializeFreshQuestions(
+                expansion.questions,
+                source: source,
+                focusSubtopic: expansionPlan.focusSubtopic
+            )
+            setQuizBuildProgress(
+                source.id,
+                stage: .saving,
+                progress: 0.82,
+                detail: "Saving the next quiz."
+            )
+            var addedCount = appendFreshQuestions(freshQuestions, sourceID: source.id)
+            if addedCount == 0, freshQuestions.isEmpty == false {
+                addedCount = appendFreshQuestions(
+                    freshQuestions,
+                    sourceID: source.id,
+                    allowSemanticOverlap: true
+                )
+            }
+            if addedCount == 0 {
+                let retryCount = await retryOnDeviceQuestionExpansion(
+                    source: source,
+                    quizOutcome: quizOutcome,
+                    expansionPlan: expansionPlan,
+                    targetCount: targetCount
+                )
+                if retryCount > 0 {
+                    return retryCount
+                }
+            }
+            let savedCount = questions.filter { $0.sourceID == source.id }.count
+            let bankPlan = questionBankPlan(for: source)
+            updateQuizBuildState(
+                source.id,
+                state: savedCount >= bankPlan.targetQuestions ? .ready : .partial,
+                detail: addedCount > 0 ? "Next quiz ready." : "Quiz ready. No fresh questions added this pass.",
+                targetCount: bankPlan.targetQuestions,
+                savedCount: savedCount,
+                stage: .saving
+            )
+            updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .processing)
+            print("[QuizLoop][Tutor] On-device quiz expansion saved added=\(addedCount) total=\(savedCount) source=\(source.title)")
+            return addedCount
+        } catch {
+            print("[QuizLoop][Tutor] On-device quiz expansion failed source=\(source.title) error=\(error.localizedDescription)")
+            let savedCount = questions.filter { $0.sourceID == source.id }.count
+            let bankPlan = questionBankPlan(for: source)
+            updateQuizBuildState(
+                source.id,
+                state: savedCount > 0 ? .partial : .failed,
+                detail: savedCount > 0 ? "Quiz ready. Fresh questions can be retried later." : "Could not create questions yet.",
+                error: error.localizedDescription,
+                targetCount: bankPlan.targetQuestions,
+                savedCount: savedCount,
+                stage: .expanding
+            )
             updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .failed)
             return 0
         }
@@ -3868,7 +3972,11 @@ final class TutorEngine: ObservableObject {
     }
 
     @discardableResult
-    private func appendFreshQuestions(_ generatedQuestions: [LearningQuestion], sourceID: UUID) -> Int {
+    private func appendFreshQuestions(
+        _ generatedQuestions: [LearningQuestion],
+        sourceID: UUID,
+        allowSemanticOverlap: Bool = false
+    ) -> Int {
         let usableQuestions = generatedQuestions
             .map { alignedQuestion($0, sourceID: sourceID) }
             .map(reclassifiedQuestion)
@@ -3902,9 +4010,14 @@ final class TutorEngine: ObservableObject {
             let angleSignature = questionAngleSignature(question)
             guard knownSignatures.contains(signature) == false else { continue }
             guard promptSignature.isEmpty || knownPromptSignatures.contains(promptSignature) == false else { continue }
-            guard angleSignature.isEmpty || knownAngleSignatures.contains(angleSignature) == false else { continue }
-            guard existingQuestions.contains(where: { isNearDuplicateQuizQuestion($0, question) }) == false else { continue }
-            guard freshQuestions.contains(where: { isNearDuplicateQuizQuestion($0, question) }) == false else { continue }
+            if allowSemanticOverlap {
+                guard existingQuestions.contains(where: { questionHasSameCoreAnswerAndSubtopic($0, question) }) == false else { continue }
+                guard freshQuestions.contains(where: { questionHasSameCoreAnswerAndSubtopic($0, question) }) == false else { continue }
+            } else {
+                guard angleSignature.isEmpty || knownAngleSignatures.contains(angleSignature) == false else { continue }
+                guard existingQuestions.contains(where: { isNearDuplicateQuizQuestion($0, question) }) == false else { continue }
+                guard freshQuestions.contains(where: { isNearDuplicateQuizQuestion($0, question) }) == false else { continue }
+            }
             knownSignatures.insert(signature)
             if promptSignature.isEmpty == false {
                 knownPromptSignatures.insert(promptSignature)
@@ -3926,6 +4039,11 @@ final class TutorEngine: ObservableObject {
         refreshJourneyAssignments()
         refreshLearningPlan()
         return freshQuestions.count
+    }
+
+    private func questionHasSameCoreAnswerAndSubtopic(_ lhs: LearningQuestion, _ rhs: LearningQuestion) -> Bool {
+        normalizedQuizAnswer(lhs.answer) == normalizedQuizAnswer(rhs.answer)
+            && normalizedQuizPrompt(lhs.subtopicTitle) == normalizedQuizPrompt(rhs.subtopicTitle)
     }
 
     private func alignedQuestion(_ question: LearningQuestion, sourceID: UUID) -> LearningQuestion {
@@ -5868,6 +5986,216 @@ final class TutorEngine: ObservableObject {
         Note text:
         \(String(learningText(for: source).prefix(6_000)))
         """
+    }
+
+    private func onDeviceNextQuizExpansionPrompt(
+        source: StudySource,
+        quizOutcome: [(question: LearningQuestion, attempt: QuestionAttempt)],
+        expansionPlan: QuestionExpansionPlan,
+        targetCount: Int,
+        retryPass: Int = 0
+    ) -> String {
+        let sourceQuestions = questions.filter { $0.sourceID == source.id }
+        let latestAttemptsByQuestion = latestAttempts()
+        let recentOutcomeLines = quizOutcome
+            .sorted { lhs, rhs in
+                if lhs.attempt.score == rhs.attempt.score {
+                    return lhs.attempt.createdAt > rhs.attempt.createdAt
+                }
+                return lhs.attempt.score < rhs.attempt.score
+            }
+            .prefix(5)
+            .enumerated()
+            .map { index, item in
+                """
+                \(index + 1). concept=\(quizConceptSignature(item.question))
+                   prompt=\(compactPromptText(item.question.prompt, limit: 150))
+                   answer=\(compactPromptText(item.question.answer, limit: 110))
+                   learner_score=\(roundedScore(item.attempt.score))
+                   learner_response=\(compactPromptText(item.attempt.response, limit: 120))
+                   missing=\(compactPromptText(item.attempt.missingIdeas.joined(separator: ", "), limit: 120))
+                """
+            }
+            .joined(separator: "\n")
+
+        let existingQuestionLines = sourceQuestions
+            .sorted { lhs, rhs in
+                let lhsAttempt = latestAttemptsByQuestion[lhs.id]
+                let rhsAttempt = latestAttemptsByQuestion[rhs.id]
+                let lhsDate = lhsAttempt?.createdAt ?? lhs.createdAt
+                let rhsDate = rhsAttempt?.createdAt ?? rhs.createdAt
+                if lhsDate != rhsDate {
+                    return lhsDate > rhsDate
+                }
+                return lhs.importance > rhs.importance
+            }
+            .prefix(14)
+            .enumerated()
+            .map { index, question in
+                let latestScore = latestAttemptsByQuestion[question.id].map { String(roundedScore($0.score)) } ?? "untested"
+                return "\(index + 1). concept=\(quizConceptSignature(question)); angle=\(assessmentAngle(for: question)); score=\(latestScore); prompt=\(compactPromptText(question.prompt, limit: 150)); answer=\(compactPromptText(question.answer, limit: 100))"
+            }
+            .joined(separator: "\n")
+
+        let uncoveredTargets = expansionPlan.coverageTargets
+            .prefix(4)
+            .map { "- \(compactPromptText($0, limit: 170))" }
+            .joined(separator: "\n")
+        let underserved = expansionPlan.underservedSubtopics
+            .prefix(4)
+            .map { "- \(compactPromptText($0, limit: 80))" }
+            .joined(separator: "\n")
+        let noteExcerpt = compactNoteExcerpt(for: source, targetCharacters: 1_900, retryPass: retryPass)
+        let retryInstruction = retryPass == 0
+            ? "This is the first pass."
+            : "The prior pass produced questions that matched known concepts and were rejected. Use a different source-supported idea, a different answer, and a different subtopic/angle from the avoid list."
+
+        return """
+        Create exactly \(targetCount) fresh multiple-choice questions for the next quiz.
+
+        Return JSON only:
+        {"questions":[{"topic_title":"\(source.title)","subtopic_title":"Specific subtopic","assessment_angle":"definition","type":"multipleChoice","prompt":"Question?","answer":"Correct choice","choices":["Correct choice","Plausible wrong choice","Plausible wrong choice","Plausible wrong choice"],"importance":0.8,"difficulty":0.6}]}
+
+        Hard rules:
+        - Use only the note excerpt below.
+        - Create multipleChoice questions only.
+        - Each question must have exactly 4 choices.
+        - The answer must exactly match one choice.
+        - Do not repeat existing prompts, answers, concepts, or tiny paraphrases.
+        - Treat concept as subtopic + answer. If concept appears under existing questions, do not create it again.
+        - If the learner scored 0.9 or higher, move to an adjacent untested idea.
+        - If the learner scored below 0.9, ask a different question about the missed idea or a closely related prerequisite.
+        - Distractors must be plausible and same style as the answer.
+        - No "all of the above", "none of the above", "not mentioned", jokes, or outside facts.
+        - Prefer concrete facts, relationships, causes, definitions, formulas, examples, and process steps.
+
+        Selected focus: \(expansionPlan.focusSubtopic ?? "Any focus")
+        Why this quiz is being built: \(expansionPlan.reason)
+        Retry instruction: \(retryInstruction)
+
+        Latest quiz evidence:
+        \(recentOutcomeLines.isEmpty ? "- No prior quiz evidence." : recentOutcomeLines)
+
+        Existing questions to avoid:
+        \(existingQuestionLines.isEmpty ? "- None." : existingQuestionLines)
+
+        Underserved subtopics:
+        \(underserved.isEmpty ? "- Use the note excerpt to find a fresh adjacent concept." : underserved)
+
+        Uncovered note targets:
+        \(uncoveredTargets.isEmpty ? "- Use the note excerpt to find a fresh adjacent concept." : uncoveredTargets)
+
+        Note title: \(source.title)
+        Note excerpt:
+        \(noteExcerpt)
+        """
+    }
+
+    private func retryOnDeviceQuestionExpansion(
+        source: StudySource,
+        quizOutcome: [(question: LearningQuestion, attempt: QuestionAttempt)],
+        expansionPlan: QuestionExpansionPlan,
+        targetCount: Int
+    ) async -> Int {
+        let retryPrompt = onDeviceNextQuizExpansionPrompt(
+            source: source,
+            quizOutcome: quizOutcome,
+            expansionPlan: expansionPlan,
+            targetCount: targetCount,
+            retryPass: 1
+        )
+
+        setQuizBuildProgress(
+            source.id,
+            stage: .expanding,
+            progress: 0.58,
+            detail: "Gemma is trying a different part of the note."
+        )
+        print("[QuizLoop][Tutor] On-device quiz expansion retry source=\(source.title) id=\(source.id) promptChars=\(retryPrompt.count)")
+
+        do {
+            let response = try await withTimeout(seconds: 90) {
+                try await self.modelReply(to: [
+                    GemmaMessage(
+                        role: "system",
+                        content: """
+                        You create fresh multiple-choice quiz questions for QuizLoop.ai.
+                        Return valid JSON only. The previous pass repeated known concepts, so this pass must use different note-supported concepts.
+                        """
+                    ),
+                    GemmaMessage(role: "user", content: retryPrompt)
+                ], timeout: 90, taskType: "quiz_generation", promptVersion: "on_device_next_quiz_retry.v1")
+            }
+
+            let expansion = try parseFreshQuestionExpansion(from: response)
+            let freshQuestions = materializeFreshQuestions(
+                expansion.questions,
+                source: source,
+                focusSubtopic: expansionPlan.focusSubtopic
+            )
+            var addedCount = appendFreshQuestions(freshQuestions, sourceID: source.id)
+            if addedCount == 0, freshQuestions.isEmpty == false {
+                addedCount = appendFreshQuestions(
+                    freshQuestions,
+                    sourceID: source.id,
+                    allowSemanticOverlap: true
+                )
+            }
+            let savedCount = questions.filter { $0.sourceID == source.id }.count
+            let bankPlan = questionBankPlan(for: source)
+            updateQuizBuildState(
+                source.id,
+                state: savedCount >= bankPlan.targetQuestions ? .ready : .partial,
+                detail: addedCount > 0 ? "Next quiz ready." : "Quiz ready. Gemma could not add fresh questions this pass.",
+                targetCount: bankPlan.targetQuestions,
+                savedCount: savedCount,
+                stage: .saving
+            )
+            updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .processing)
+            print("[QuizLoop][Tutor] On-device quiz expansion retry saved added=\(addedCount) total=\(savedCount) source=\(source.title)")
+            return addedCount
+        } catch {
+            print("[QuizLoop][Tutor] On-device quiz expansion retry failed source=\(source.title) error=\(error.localizedDescription)")
+            return 0
+        }
+    }
+
+    private func compactPromptText(_ text: String, limit: Int) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > limit else { return normalized }
+        return String(normalized.prefix(max(limit - 1, 1))) + "..."
+    }
+
+    private func compactNoteExcerpt(for source: StudySource, targetCharacters: Int, retryPass: Int = 0) -> String {
+        let fullText = learningText(for: source)
+        guard fullText.count > targetCharacters else { return fullText }
+
+        if retryPass > 0 {
+            let offset = min(max(0, fullText.count - targetCharacters), targetCharacters * retryPass)
+            let start = fullText.index(fullText.startIndex, offsetBy: offset)
+            return compactPromptText(String(fullText[start...]), limit: targetCharacters)
+        }
+
+        let coverageTargets = missingCoverageTargets(for: source, limit: 4)
+        let targetText = coverageTargets.joined(separator: " ")
+        if targetText.isEmpty == false {
+            let targetTokens = meaningfulQuizTokens(targetText)
+            let sentences = conceptSentences(in: fullText)
+            let matched = sentences
+                .filter { sentence in
+                    meaningfulQuizTokens(sentence).intersection(targetTokens).isEmpty == false
+                }
+                .prefix(8)
+                .joined(separator: ". ")
+            if matched.isEmpty == false {
+                return compactPromptText(matched, limit: targetCharacters)
+            }
+        }
+
+        return compactPromptText(fullText, limit: targetCharacters)
     }
 
     private func questionBankPlan(for source: StudySource) -> QuestionBankPlan {

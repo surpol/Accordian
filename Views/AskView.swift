@@ -78,7 +78,10 @@ struct AskView: View {
     }
 
     private var canStartQuiz: Bool {
-        assistant.hasAvailableQuizQuestions(for: selectedSource, focusSubtopic: selectedQuizFocus)
+        guard assistant.isPreparingNextQuiz(for: selectedSource?.id) == false else {
+            return false
+        }
+        return assistant.hasAvailableQuizQuestions(for: selectedSource, focusSubtopic: selectedQuizFocus)
     }
 
     private var availableQuizQuestionCount: Int {

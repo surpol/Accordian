@@ -1,4 +1,4 @@
-const STORAGE_KEY = "accordian.web.state.v3";
+const STORAGE_KEY = "quizloop.web.state.v1";
 
 function loadStoredState() {
   try {
@@ -397,7 +397,7 @@ function populateNoteEditor() {
   if ($("shapeNoteButton")) $("shapeNoteButton").hidden = false;
   $("noteSummaryBox").hidden = false;
   $("noteSummaryText").textContent = note.summary || (note.status === "building"
-    ? "Accordian is reading this note now."
+    ? "QuizLoop is reading this note now."
     : "No summary yet. Save or rebuild this note to generate one.");
   document.querySelector(".wiki-box")?.removeAttribute("open");
   document.querySelector(".wiki-box").hidden = true;
@@ -475,7 +475,7 @@ function updateSourceModeUI() {
     $("shapeNoteButton").textContent = hasGemma ? "Shape with Gemma" : "Organize Note";
     $("shapeNoteButton").title = hasGemma
       ? "Use Gemma to reshape this note for quizzes."
-      : "Gemma is not connected on this hosted domain, so Accordian keeps the note structured for source-grounded checks.";
+      : "Gemma is not connected on this hosted domain, so QuizLoop keeps the note structured for source-grounded checks.";
   }
   if ($("noteTitle")) $("noteTitle").placeholder = copy.title;
   if ($("noteBody")) $("noteBody").placeholder = copy.body;
@@ -878,7 +878,7 @@ function bookTemplateBodyFor(key) {
       "",
       "### Source text:",
       "",
-      "Paste the full book text here. Accordian will split it into study sections automatically.",
+      "Paste the full book text here. QuizLoop will split it into study sections automatically.",
       "",
       "### Study goal:",
       "",
@@ -1149,8 +1149,8 @@ function renderActiveNote() {
 
   $("activeTitle").textContent = note.title;
   $("activeSummary").textContent = note.summary || (note.sourceType === "books" && Number(note.sectionCount || 0) > 1
-    ? `Accordian split this book into ${note.sectionCount} study sections and prepares quizzes progressively.`
-    : "Accordian prepares quizzes automatically from this note.");
+    ? `QuizLoop split this book into ${note.sectionCount} study sections and prepares quizzes progressively.`
+    : "QuizLoop prepares quizzes automatically from this note.");
   $("questionCount").textContent = note.queuedQuizCount > 0
     ? "Quiz ready"
     : note.status === "building"
@@ -1160,18 +1160,23 @@ function renderActiveNote() {
   $("attemptLabel").textContent = "answered";
   $("understandingScore").textContent = percent(note.averageScore);
 
-  const isReading = note.status === "building" || state.waitingForNextQuizNoteId === note.id || state.prepState?.noteId === note.id;
+  const hasRunnableQuiz = note.queuedQuizCount > 0 || note.questionCount > 0;
+  const isReading = !hasRunnableQuiz && (
+    note.status === "building" ||
+    state.waitingForNextQuizNoteId === note.id ||
+    state.prepState?.noteId === note.id
+  );
   $("noteStatusBanner").hidden = !isReading;
   if (isReading) {
     const progress = prepProgressPercent(note);
     $("noteStatusTitle").textContent = note.questionCount > 0 ? "Preparing next quiz" : "Reading note";
     $("noteStatusDetail").textContent = note.questionCount > 0
       ? `Using your history to shape fresh checks. ${progress}% estimated.`
-      : `${state.intelligence?.available ? "Gemma is turning" : "Accordian is turning"} this text into topics and quiz checks. ${progress}% estimated.`;
+      : `${state.intelligence?.available ? "Gemma is turning" : "QuizLoop is turning"} this text into topics and quiz checks. ${progress}% estimated.`;
   }
 
   const journeyComplete = state.journeyCompleteNoteId === note.id;
-  const hasReadyQuiz = note.queuedQuizCount > 0;
+  const hasReadyQuiz = note.queuedQuizCount > 0 || note.questionCount > 0;
   const showJourneyComplete = journeyComplete && !hasReadyQuiz && note.status !== "building";
   const showingQuiz = state.quiz.length > 0 && state.quizNoteId === note.id;
   $("startQuizButton").hidden = showingQuiz;
@@ -1193,18 +1198,18 @@ function renderQuiz() {
   document.body.classList.toggle("quiz-active", quizInProgress);
   if (state.quiz.length === 0) {
     if (!note) return;
-    if (state.journeyCompleteNoteId === note.id && note.queuedQuizCount === 0 && note.status !== "building") {
-      area.innerHTML = `<div class="empty"><strong>Journey complete.</strong><br>Accordian has no fresh quiz set to serve from this note right now. Add more notes or rebuild the journey for harder checks.</div>`;
+    if (state.journeyCompleteNoteId === note.id && note.queuedQuizCount === 0 && note.questionCount === 0 && note.status !== "building") {
+      area.innerHTML = `<div class="empty"><strong>Journey complete.</strong><br>QuizLoop has no fresh quiz set to serve from this note right now. Add more notes or rebuild the journey for harder checks.</div>`;
       return;
     }
-    if (note.queuedQuizCount > 0) {
+    if (note.queuedQuizCount > 0 || note.questionCount > 0) {
       area.innerHTML = "";
       return;
     }
     if (note.status === "building" || state.waitingForNextQuizNoteId === note.id || state.prepState?.noteId === note.id) {
       const message = state.prepState?.noteId === note.id
         ? state.prepState.message
-        : "Accordian is using your last answers to unlock fresh or harder checks.";
+        : "QuizLoop is using your last answers to unlock fresh or harder checks.";
       const elapsed = state.prepState?.noteId === note.id ? prepElapsedText() : "";
       area.innerHTML = compactPrepHTML(
         "Preparing your next quiz",
@@ -1293,8 +1298,8 @@ function renderQuizResult(result, options = {}) {
   const nextQuizPreparing = !hasQueuedQuizNow && (stillPreparing || nextQuizStatus === "preparing" || nextQuizStatus === "already_preparing");
   const nextQuizText = nextQuizPreparing
     ? result.score >= 0.999
-      ? "Perfect score. Accordian is unlocking harder checks in the background."
-      : "Accordian is preparing fresh follow-up checks in the background."
+      ? "Perfect score. QuizLoop is unlocking harder checks in the background."
+      : "QuizLoop is preparing fresh follow-up checks in the background."
     : hasQueuedQuizNow || nextQuizStatus === "ready"
       ? "Your next quiz is ready."
       : "Your results were saved for the next quiz.";
@@ -1463,11 +1468,11 @@ async function loadNotes() {
     if (!state.activeNoteId) state.libraryMode = "editor";
   }
   const waitingNote = state.notes.find((note) => note.id === state.waitingForNextQuizNoteId);
-  if (waitingNote && waitingNote.status !== "building") {
+  if (waitingNote && (waitingNote.status !== "building" || waitingNote.queuedQuizCount > 0 || waitingNote.questionCount > 0)) {
     state.waitingForNextQuizNoteId = null;
   }
   const prepNote = state.notes.find((note) => note.id === state.prepState?.noteId);
-  if (prepNote && prepNote.status !== "building") {
+  if (prepNote && (prepNote.status !== "building" || prepNote.queuedQuizCount > 0 || prepNote.questionCount > 0)) {
     state.prepState = null;
   }
   const active = activeNote();
@@ -1475,7 +1480,7 @@ async function loadNotes() {
     state.prepState = {
       noteId: active.id,
       status: "preparing",
-      message: "Accordian is preparing your next quiz.",
+      message: "QuizLoop is preparing your next quiz.",
       startedAt: Date.now()
     };
   }
@@ -1535,8 +1540,8 @@ async function saveNote(event) {
     state.editorMode = "edit";
     state.editingNoteId = payload.note.id;
     setPrepState(payload.note.id, existingNote
-      ? "Accordian is rebuilding this note."
-      : "Accordian is preparing your first quiz.");
+      ? "QuizLoop is rebuilding this note."
+      : "QuizLoop is preparing your first quiz.");
     state.noteDraft = { title: "", body: "" };
     $("noteTitle").value = "";
     $("noteBody").value = "";
@@ -1648,7 +1653,7 @@ async function importWikipedia(title) {
     state.activeNoteId = payload.note.id;
     state.editorMode = "edit";
     state.editingNoteId = payload.note.id;
-    setPrepState(payload.note.id, "Accordian is preparing your first quiz.");
+    setPrepState(payload.note.id, "QuizLoop is preparing your first quiz.");
     state.wikiResults = [];
     $("wikiQuery").value = "";
     await loadNotes();
@@ -1673,7 +1678,7 @@ async function exportBackup() {
     const link = document.createElement("a");
     const stamp = new Date().toISOString().slice(0, 10);
     link.href = url;
-    link.download = `accordian-backup-${stamp}.sqlite`;
+    link.download = `quizloop-backup-${stamp}.sqlite`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1740,7 +1745,7 @@ async function startQuiz() {
     state.answers.clear();
     state.index = 0;
     if (state.quiz.length === 0 && (payload.nextQuiz?.status === "preparing" || payload.nextQuiz?.status === "already_preparing")) {
-      setPrepState(note.id, "Accordian is unlocking fresh checks from your learning history.");
+      setPrepState(note.id, "QuizLoop is unlocking fresh checks from your learning history.");
       state.journeyCompleteNoteId = null;
     } else {
       clearPrepState(note.id);
@@ -1769,8 +1774,8 @@ async function submitQuiz() {
   clearStoredQuiz();
   if (result.nextQuiz?.status === "preparing" || result.nextQuiz?.status === "already_preparing") {
     setPrepState(note.id, result.score >= 0.999
-      ? "Perfect score. Accordian is unlocking harder checks."
-      : "Accordian is preparing follow-up checks from your last answers.");
+      ? "Perfect score. QuizLoop is unlocking harder checks."
+      : "QuizLoop is preparing follow-up checks from your last answers.");
   } else {
     clearPrepState(note.id);
   }

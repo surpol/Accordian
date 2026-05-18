@@ -250,9 +250,10 @@ async function ensureQuestions(env, noteId) {
   const existing = await env.DB.prepare(`SELECT prompt, answer FROM questions WHERE note_id = ?`).bind(noteId).all();
   const existingQuestions = existing.results || [];
   const desired = desiredQuestionCount(note);
+  const minimumQuizBank = initialQuizBankSize(note);
   let insertedQuestions = false;
-  if (existingQuestions.length < desired) {
-    const questions = await generateQuestions(env, note, desired - existingQuestions.length, existingQuestions);
+  if (existingQuestions.length < minimumQuizBank) {
+    const questions = await generateQuestions(env, note, minimumQuizBank - existingQuestions.length, existingQuestions, false);
     for (const question of questions) {
       await insertQuestion(env.DB, noteId, question);
       insertedQuestions = true;
@@ -285,19 +286,102 @@ async function insertQuestion(db, noteId, question) {
 async function queueQuiz(db, noteId, focus = "") {
   const ready = await db.prepare(`SELECT id FROM quiz_queue WHERE note_id = ? AND state = 'ready' LIMIT 1`).bind(noteId).first();
   if (ready) return;
-  const rows = await db.prepare(`
+  const note = await noteSummary(db, noteId);
+  const totalQuestions = Number(note?.questionCount || 0);
+  const quizSize = adaptiveQuizSize(note, focus, totalQuestions);
+  const minimumUsefulQuizSize = Math.min(4, totalQuestions);
+  const candidateLimit = Math.max(48, quizSize * 6);
+  let rows = await db.prepare(`
     SELECT * FROM questions
     WHERE note_id = ?
       AND (? = '' OR topic = ? OR subtopic = ?)
     ORDER BY COALESCE(understanding_score, 0) ASC, COALESCE(last_seen_at, 0) ASC, RANDOM()
-    LIMIT 8
-  `).bind(noteId, focus, focus, focus).all();
-  const ids = rows.results.map((row) => row.id);
+    LIMIT ?
+  `).bind(noteId, focus, focus, focus, candidateLimit).all();
+  if (focus && rows.results.length < minimumUsefulQuizSize) {
+    rows = await db.prepare(`
+      SELECT * FROM questions
+      WHERE note_id = ?
+      ORDER BY COALESCE(understanding_score, 0) ASC, COALESCE(last_seen_at, 0) ASC, RANDOM()
+      LIMIT ?
+    `).bind(noteId, candidateLimit).all();
+  }
+  const ids = selectQuizRows(rows.results || [], quizSize).map((row) => row.id);
   if (ids.length === 0) return;
   await db.prepare(`
     INSERT INTO quiz_queue (id, note_id, state, question_ids, summary, created_at)
     VALUES (?, ?, 'ready', ?, 'Quiz prepared from Cloudflare D1 memory.', ?)
   `).bind(crypto.randomUUID(), noteId, JSON.stringify(ids), now()).run();
+}
+
+function initialQuizBankSize(note) {
+  const desired = desiredQuestionCount(note);
+  return Math.max(1, Math.min(desired, adaptiveQuizSize(note, "", desired)));
+}
+
+function adaptiveQuizSize(note, focus = "", availableQuestions = 0) {
+  const available = Math.max(0, Number(availableQuestions || 0));
+  if (available <= 0) return 0;
+  if (available <= 6) return available;
+
+  const attempts = Number(note?.attemptCount || 0);
+  const sourceType = String(note?.sourceType || "");
+  const focused = Boolean(String(focus || "").trim());
+
+  if (focused) return Math.min(available, attempts >= 12 ? 8 : 6);
+  if (available <= 10) return Math.min(available, 8);
+  if (available <= 18) return Math.min(available, attempts >= 12 ? 12 : 10);
+  if (sourceType === "books") return Math.min(available, attempts >= 24 ? 14 : 12);
+  return Math.min(available, attempts >= 24 ? 12 : 10);
+}
+
+function selectQuizRows(rows, limit) {
+  const selected = [];
+  const pushIf = (row, predicate) => {
+    if (selected.length >= limit || selected.some((item) => item.id === row.id)) return;
+    if (predicate(row, selected)) selected.push(row);
+  };
+
+  for (const row of rows) {
+    pushIf(row, (candidate, current) =>
+      !current.some((item) => normalize(item.topic) === normalize(candidate.topic)) &&
+      isDiverseQuizCandidate(candidate, current)
+    );
+  }
+  for (const row of rows) {
+    pushIf(row, (candidate, current) => isDiverseQuizCandidate(candidate, current));
+  }
+  for (const row of rows) {
+    pushIf(row, (candidate, current) =>
+      !current.some((item) => normalize(item.prompt) === normalize(candidate.prompt))
+    );
+  }
+  return selected.slice(0, limit);
+}
+
+function isDiverseQuizCandidate(candidate, selected) {
+  return !selected.some((item) =>
+    normalize(item.subtopic) === normalize(candidate.subtopic) ||
+    normalize(item.answer) === normalize(candidate.answer) ||
+    quizPromptFamily(item.prompt) === quizPromptFamily(candidate.prompt) ||
+    tokenOverlap(normalize(item.prompt), normalize(candidate.prompt)) >= 0.68
+  );
+}
+
+function quizPromptFamily(prompt) {
+  const clean = normalize(prompt)
+    .replace(/\blebron\b|\bjames\b/g, "")
+    .replace(/\b\d+\b/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/^what record .* hold regarding the most/.test(clean)) return "record-most";
+  if (/^how many .* mvp/.test(clean)) return "count-mvp";
+  if (/^how many .* all star/.test(clean)) return "count-all-star";
+  if (/^how many .* all defensive/.test(clean)) return "count-defense";
+  if (/^how many .* finals/.test(clean)) return "count-finals";
+  if (/^how many .* championships/.test(clean)) return "count-championships";
+  if (/^how many/.test(clean)) return clean.split(" ").slice(0, 5).join(" ");
+  return clean.split(" ").slice(0, 7).join(" ");
 }
 
 async function startQuiz(env, noteId, focus = "") {
@@ -542,7 +626,7 @@ async function wikipediaJSON(params) {
   const response = await fetch(url, {
     headers: {
       accept: "application/json",
-      "user-agent": "Accordian.ai/1.0 (https://accordian-bgp.pages.dev; Kaggle Gemma 4 Good demo)"
+      "user-agent": "QuizLoop.ai/1.0 (https://accordian-bgp.pages.dev; Kaggle Gemma 4 Good demo)"
     }
   });
   const text = await response.text();
@@ -564,7 +648,7 @@ Return {"summary":"..."}.
 TITLE: ${title}
 NOTE: ${String(body || "").slice(0, 5000)}
 `);
-  return String(result?.summary || fallback || "Accordian will prepare quizzes from this note.").slice(0, 420);
+  return String(result?.summary || fallback || "QuizLoop will prepare quizzes from this note.").slice(0, 420);
 }
 
 async function shapeNote(env, title, body, sourceType) {

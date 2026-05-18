@@ -7,11 +7,11 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="Accordian" />
-    <title>Accordian</title>
+    <meta name="apple-mobile-web-app-title" content="QuizLoop.ai" />
+    <title>QuizLoop.ai</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=84" />
+    <link rel="stylesheet" href="/styles.css?v=88" />
   </head>
   <body>
     <main class="shell">
@@ -19,7 +19,7 @@
         <div class="brand-lockup">
           <img class="app-logo" src="/icon.svg" alt="" aria-hidden="true" />
           <div>
-            <h1>Accordian.ai</h1>
+            <h1>QuizLoop.ai</h1>
             <p class="subtitle">Learn one note at a time.</p>
           </div>
         </div>
@@ -56,7 +56,7 @@
                     <span class="status-dot" aria-hidden="true"></span>
                     <div>
                       <strong id="noteStatusTitle">Reading note</strong>
-                      <p id="noteStatusDetail">Accordian is turning this text into quiz checks.</p>
+                      <p id="noteStatusDetail">QuizLoop is turning this text into quiz checks.</p>
                     </div>
                   </div>
                   <p class="home-label" id="questionCount">0 checks ready</p>
@@ -102,7 +102,7 @@
               <div class="backup-actions">
                 <button type="button" id="exportBackupButton" class="secondary">Export</button>
                 <button type="button" id="importBackupButton" class="secondary">Import</button>
-                <input id="backupFileInput" type="file" accept=".sqlite,.db,.accordian,application/octet-stream" hidden />
+                <input id="backupFileInput" type="file" accept=".sqlite,.db,.quizloop,.accordian,application/octet-stream" hidden />
               </div>
             </section>
           </section>
@@ -112,7 +112,7 @@
               <div>
                 <button type="button" id="backToNotesButton" class="back-button">← Notes</button>
                 <h2 id="editorTitle">New Note</h2>
-                <p class="muted" id="editorSubtitle">Paste text. Accordian prepares quizzes automatically.</p>
+                <p class="muted" id="editorSubtitle">Paste text. QuizLoop prepares quizzes automatically.</p>
               </div>
               <details class="note-menu" id="noteMenu">
                 <summary aria-label="Note actions">•••</summary>
@@ -145,7 +145,7 @@
               </section>
               <section class="book-box" id="bookBox" hidden>
                 <strong>Books become study sections.</strong>
-                <p>Paste a chapter, passage, or full public-domain book. Accordian splits long text before making quizzes.</p>
+                <p>Paste a chapter, passage, or full public-domain book. QuizLoop splits long text before making quizzes.</p>
                 <div class="book-template-grid">
                   <button type="button" class="book-template-card" data-book-template="blank">
                     <span>Custom</span>
@@ -175,7 +175,7 @@
               </section>
               <section class="math-box" id="mathBox" hidden>
                 <strong>Math works best with structure.</strong>
-                <p>Choose a structure. Accordian will turn it into targeted practice checks.</p>
+                <p>Choose a structure. QuizLoop will turn it into targeted practice checks.</p>
                 <div class="math-template-grid">
                   <button type="button" class="math-template-card" data-math-template="blank">
                     <span>Custom</span>
@@ -250,6 +250,6 @@
         </div>
       </section>
     </main>
-    <script src="/app.js?v=84" type="module"></script>
+    <script src="/app.js?v=88" type="module"></script>
   </body>
 </html>

@@ -189,7 +189,6 @@ private struct NoteRow: View {
         buildProgress != nil
             || source.quizBuildState == .building
             || assistant.isPreparingNextQuiz(for: source.id)
-            || (savedCheckCount > 0 && availableCheckCount == 0 && assistant.modelReadiness.isReady)
     }
 
     private var statusColor: Color {

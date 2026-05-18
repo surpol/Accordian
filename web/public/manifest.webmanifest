@@ -1,6 +1,6 @@
 {
-  "name": "Accordian",
-  "short_name": "Accordian",
+  "name": "QuizLoop.ai",
+  "short_name": "QuizLoop",
   "description": "Turn notes into guided quizzes and learning evidence.",
   "start_url": "/",
   "scope": "/",
