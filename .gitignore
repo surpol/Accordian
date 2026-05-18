@@ -1,13 +1,43 @@
 .DS_Store
+
+# Xcode / local build output
+build/
 DerivedData/
 .derivedData/
 .derivedData-ios/
-Pods/
 *.xcuserstate
 xcuserdata/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
+
+# CocoaPods
+Pods/
+
+# Swift Package Manager local state
+.build/
+.swiftpm/
+
+# Web app dependencies and build output
+web/node_modules/
+web/.next/
+web/dist/
+web/out/
+web/.vite/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Local app data
 web/data/*.sqlite
 web/data/*.sqlite-shm
 web/data/*.sqlite-wal
 web/data/*.db
+
+# Local Gemma/model artifacts should be downloaded, not committed.
+*.gguf
+*.task
+*.litertlm
+*.safetensors
+*.bin

@@ -268,7 +268,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "LITERT_FRAMEWORK=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CLiteRTLM.framework\"\nNESTED_DYLIB=\"${LITERT_FRAMEWORK}/libGemmaModelConstraintProvider.dylib\"\n\nif [ -f \"${NESTED_DYLIB}\" ] && [ -n \"${EXPANDED_CODE_SIGN_IDENTITY}\" ]; then\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"${NESTED_DYLIB}\"\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"${LITERT_FRAMEWORK}\"\nfi\n";
+				shellScript = "APP_BUNDLE=\"${TARGET_BUILD_DIR}/${FULL_PRODUCT_NAME}\"\nLITERT_FRAMEWORK=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/CLiteRTLM.framework\"\nNESTED_DYLIB=\"${LITERT_FRAMEWORK}/libGemmaModelConstraintProvider.dylib\"\n\nif [ -d \"${APP_BUNDLE}\" ]; then\n  /bin/chmod -R u+w \"${APP_BUNDLE}\" || true\n  /usr/bin/xattr -cr \"${APP_BUNDLE}\" || true\nfi\n\nif [ -f \"${NESTED_DYLIB}\" ] && [ -n \"${EXPANDED_CODE_SIGN_IDENTITY}\" ]; then\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"${NESTED_DYLIB}\"\n  /usr/bin/codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"${LITERT_FRAMEWORK}\"\nfi\n\nif [ -d \"${APP_BUNDLE}\" ]; then\n  /usr/bin/xattr -cr \"${APP_BUNDLE}\" || true\nfi\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */

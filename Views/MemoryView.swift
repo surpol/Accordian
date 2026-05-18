@@ -142,7 +142,7 @@ private struct NoteRow: View {
 
         if let buildProgress {
             if hasReadyQuiz {
-                return "\(prefix)Building more"
+                return "\(prefix)Ready · adding questions"
             }
             return "\(prefix)\(buildProgress.stage.title) · \(buildProgress.percentText)"
         }
@@ -152,7 +152,7 @@ private struct NoteRow: View {
         }
 
         if source.quizBuildState == .partial {
-            return hasReadyQuiz ? "\(prefix)Building more" : "\(prefix)Creating quiz"
+            return hasReadyQuiz ? "\(prefix)Ready" : "\(prefix)Creating quiz"
         }
 
         if assistant.modelReadiness.isReady == false {
@@ -164,7 +164,7 @@ private struct NoteRow: View {
         }
 
         if hasReadyQuiz {
-            return "\(prefix)\(compactWordCount) words"
+            return "\(prefix)Ready"
         }
 
         if savedCheckCount > 0 {

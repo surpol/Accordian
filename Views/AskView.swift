@@ -326,6 +326,7 @@ struct AskView: View {
     private func prepareNextQuizIfNeeded() {
         guard let selectedSourceID else { return }
         let source = assistant.sources.first { $0.id == selectedSourceID }
+        assistant.logQuizState(for: source, reason: "home_prepare_next", focusSubtopic: selectedQuizFocus)
         assistant.prepareNextQuizIfNeeded(for: source, focusSubtopic: selectedQuizFocus)
     }
 
@@ -341,6 +342,7 @@ struct AskView: View {
     }
 
     private func primaryAction() {
+        assistant.logQuizState(for: selectedSource, reason: "home_primary_action", focusSubtopic: selectedQuizFocus)
         if canStartQuiz {
             startQuiz()
             return
@@ -359,6 +361,7 @@ struct AskView: View {
 
     private func startQuiz() {
         guard canStartQuiz else { return }
+        assistant.logQuizState(for: selectedSource, reason: "quiz_start_tapped", focusSubtopic: selectedQuizFocus)
         let sessionSeed = quizSeed
         quizSeed = UUID()
         let quizSelections = assistant.buildQuizSelections(
@@ -367,6 +370,7 @@ struct AskView: View {
             seed: sessionSeed
         )
         guard quizSelections.isEmpty == false else { return }
+        print("[QuizLoop][Flow] quiz.session.start source=\(selectedSource?.title ?? "unknown") count=\(quizSelections.count) focus=\(selectedQuizFocus ?? "any") questions=\(quizSelections.map { $0.question.prompt }.joined(separator: " | "))")
 
         let session = QuizSession(
             sourceID: selectedSource?.id,
@@ -458,6 +462,8 @@ struct AskView: View {
                 previousQuizScore: assistant.recentQuizHistory(for: selectedSource, limit: 1).first?.score
             )
             assistant.saveQuizHistory(review.historyEntry)
+            assistant.prepareNextQuizAfterCompletedQuiz(from: session.submissions, attempts: attempts)
+            assistant.logQuizState(for: selectedSource, reason: "quiz_finished_saved", focusSubtopic: selectedQuizFocus)
             quizSession = nil
             quizReview = review
             activeQuestion = nil
@@ -1148,7 +1154,7 @@ private struct CompactLearningStatus: View {
                 return "No fresh questions are ready. Review older questions now."
             }
             if buildProgress != nil {
-                return "Start when you want. More quiz material is being made quietly."
+                return "Start when you want. Gemma is adding more questions in the background."
             }
             return node.snapshot.testedCount == 0 ? "Start with the next quiz." : performanceSubheadline
         }
@@ -1200,7 +1206,7 @@ private struct CompactLearningStatus: View {
         case .rebuildingQuiz:
             return "Updating quietly"
         case .quizReadyBuildingMore:
-            return canStartQuiz ? "More is being made" : "Making next quiz"
+            return canStartQuiz ? "Ready · adding questions" : "Making next quiz"
         case .waitingForModel:
             return "Model setup needed"
         case .processingFailed:

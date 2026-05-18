@@ -3,6 +3,26 @@ import Foundation
 import FoundationModels
 #endif
 
+private func quizLoopLog(_ event: String, fields: [String: Any?] = [:]) {
+    let formattedFields = fields
+        .compactMap { key, value -> String? in
+            guard let value else { return nil }
+            let rawValue = String(describing: value)
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\t", with: " ")
+            let shortenedValue = rawValue.count > 180 ? "\(rawValue.prefix(180))..." : rawValue
+            return "\(key)=\(shortenedValue)"
+        }
+        .sorted()
+        .joined(separator: " ")
+    let suffix = formattedFields.isEmpty ? "" : " \(formattedFields)"
+    print("[QuizLoop][Flow] \(event)\(suffix)")
+}
+
+private extension UUID {
+    var logID: String { String(uuidString.prefix(8)) }
+}
+
 @MainActor
 final class TutorEngine: ObservableObject {
     @Published private(set) var turns: [TutorTurn]
@@ -545,6 +565,18 @@ final class TutorEngine: ObservableObject {
     ) async throws -> String {
         let start = Date.now
         let inputChars = messages.reduce(0) { $0 + $1.content.count }
+        quizLoopLog(
+            "gemma.request.start",
+            fields: [
+                "task": taskType,
+                "prompt": promptVersion,
+                "model": gemmaService.modelName,
+                "mode": modelConfiguration.mode.rawValue,
+                "inputChars": inputChars,
+                "timeout": timeout.map { "\(Int($0))" } ?? "none",
+                "metadata": metadata
+            ]
+        )
 
         func latencyMS() -> Int {
             Int(Date.now.timeIntervalSince(start) * 1_000)
@@ -552,6 +584,15 @@ final class TutorEngine: ObservableObject {
 
         do {
             let response = try await gemmaService.reply(to: messages, timeout: timeout)
+            quizLoopLog(
+                "gemma.request.success",
+                fields: [
+                    "task": taskType,
+                    "prompt": promptVersion,
+                    "outputChars": response.count,
+                    "latencyMS": latencyMS()
+                ]
+            )
             conversationStore.saveModelRun(
                 taskType: taskType,
                 modelName: gemmaService.modelName,
@@ -564,6 +605,15 @@ final class TutorEngine: ObservableObject {
             )
             return response
         } catch {
+            quizLoopLog(
+                "gemma.request.failure",
+                fields: [
+                    "task": taskType,
+                    "prompt": promptVersion,
+                    "latencyMS": latencyMS(),
+                    "error": error.localizedDescription
+                ]
+            )
             conversationStore.saveModelRun(
                 taskType: taskType,
                 modelName: gemmaService.modelName,
@@ -643,6 +693,18 @@ final class TutorEngine: ObservableObject {
             quizBuildState: .building,
             quizBuildDetail: "Waiting for Gemma."
         )
+        let plan = questionBankPlan(for: source)
+        quizLoopLog(
+            "note.create",
+            fields: [
+                "source": source.title,
+                "id": source.id.logID,
+                "type": type.rawValue,
+                "words": plan.wordCount,
+                "targetQuestions": plan.targetQuestions,
+                "minimumQuestions": plan.minimumQuestions
+            ]
+        )
 
         sources.insert(source, at: 0)
         conversationStore.save(source)
@@ -666,6 +728,7 @@ final class TutorEngine: ObservableObject {
         )
 
         Task {
+            quizLoopLog("note.process.task.start", fields: ["source": source.title, "id": source.id.logID])
             await organizeTopics(for: source)
         }
 
@@ -851,6 +914,17 @@ final class TutorEngine: ObservableObject {
             quizBuildUpdatedAt: .now,
             createdAt: source.createdAt
         )
+        let plan = questionBankPlan(for: updatedSource)
+        quizLoopLog(
+            "note.update",
+            fields: [
+                "source": updatedSource.title,
+                "id": updatedSource.id.logID,
+                "words": plan.wordCount,
+                "targetQuestions": plan.targetQuestions,
+                "minimumQuestions": plan.minimumQuestions
+            ]
+        )
 
         conversationStore.save(updatedSource)
         conversationStore.saveInteractionEvent(
@@ -871,6 +945,7 @@ final class TutorEngine: ObservableObject {
         refreshJourneyAssignments()
 
         Task {
+            quizLoopLog("note.reprocess.task.start", fields: ["source": updatedSource.title, "id": updatedSource.id.logID])
             await organizeTopics(for: updatedSource)
         }
     }
@@ -949,6 +1024,16 @@ final class TutorEngine: ObservableObject {
 
     private func organizeTopics(for source: StudySource) async {
         let bankPlan = questionBankPlan(for: source)
+        quizLoopLog(
+            "note.process.start",
+            fields: [
+                "source": source.title,
+                "id": source.id.logID,
+                "words": bankPlan.wordCount,
+                "target": bankPlan.targetQuestions,
+                "minimum": bankPlan.minimumQuestions
+            ]
+        )
         setQuizBuildProgress(
             source.id,
             stage: .reading,
@@ -978,6 +1063,18 @@ final class TutorEngine: ObservableObject {
             conversationStore.replaceQuestions(for: source.id, questions: finalDeduplicatedQuestions)
             questions = conversationStore.loadQuestions()
             updateSourceStatus(source.id, status: .ready)
+            quizLoopLog(
+                "note.process.seed.success",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "topics": finalTopics.count,
+                    "segments": finalSegments.count,
+                    "questions": finalDeduplicatedQuestions.count,
+                    "target": bankPlan.targetQuestions,
+                    "minimumUsable": minimumUsableQuestions
+                ]
+            )
             if finalDeduplicatedQuestions.count < bankPlan.targetQuestions {
                 updateQuizBuildState(
                     source.id,
@@ -1000,6 +1097,14 @@ final class TutorEngine: ObservableObject {
                 clearQuizBuildProgress(for: source.id)
             }
         } catch {
+            quizLoopLog(
+                "note.process.failure",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "error": error.localizedDescription
+                ]
+            )
             let savedModelQuestions = questions.filter { $0.sourceID == source.id }
             if savedModelQuestions.isEmpty {
                 conversationStore.replaceTopics(for: source.id, topics: [])
@@ -1391,8 +1496,10 @@ final class TutorEngine: ObservableObject {
         noteText: String,
         targetCount: Int
     ) async throws -> [LearningQuestion] {
-        let clampedTarget = min(max(targetCount, 4), 8)
-        let timeout: TimeInterval = isOnDeviceLiteRTLM ? 75 : 60
+        let clampedTarget = isOnDeviceLiteRTLM
+            ? min(max(targetCount, minimumFreshQuizCount), 4)
+            : min(max(targetCount, 4), 8)
+        let timeout: TimeInterval = isOnDeviceLiteRTLM ? 180 : 60
         let generationLockID = await acquireQuestionGenerationTurn(
             source: source,
             reason: "multiple_choice_seed"
@@ -1405,7 +1512,17 @@ final class TutorEngine: ObservableObject {
             )
         }
 
-        print("[QuizLoop][Tutor] Requesting MC seed questions source=\(source.title) target=\(clampedTarget) noteChars=\(noteText.count)")
+        quizLoopLog(
+            "quiz.generation.request",
+            fields: [
+                "source": source.title,
+                "id": source.id.logID,
+                "target": clampedTarget,
+                "noteChars": noteText.count,
+                "timeout": Int(timeout),
+                "mode": modelConfiguration.mode.rawValue
+            ]
+        )
         let response = try await withTimeout(seconds: UInt64(ceil(timeout))) {
             try await self.modelReply(to: [
                 GemmaMessage(
@@ -1531,11 +1648,11 @@ final class TutorEngine: ObservableObject {
                     targetCount: plan.targetQuestions,
                     savedCount: savedCount
                 )
-                if savedCount < plan.targetQuestions {
+                if savedCount < minimumFreshQuizCount {
                     _ = await topUpQuestionBank(
                         for: source,
                         reason: "resume_partial_bank",
-                        maxPasses: 3
+                        maxPasses: isOnDeviceLiteRTLM ? 1 : 3
                     )
                 }
                 continue
@@ -1627,6 +1744,17 @@ final class TutorEngine: ObservableObject {
     }
 
     private func updateSourceStatus(_ sourceID: UUID, status: StudySource.ProcessingStatus) {
+        let sourceTitle = sources.first(where: { $0.id == sourceID })?.title ?? "unknown"
+        let previousStatus = sources.first(where: { $0.id == sourceID })?.status.rawValue
+        quizLoopLog(
+            "note.status.persist",
+            fields: [
+                "source": sourceTitle,
+                "id": sourceID.logID,
+                "from": previousStatus,
+                "to": status.rawValue
+            ]
+        )
         conversationStore.updateSourceStatus(id: sourceID, status: status)
         sources = sources.map { source in
             guard source.id == sourceID else { return source }
@@ -1657,6 +1785,20 @@ final class TutorEngine: ObservableObject {
         savedCount: Int,
         stage: QuizBuildProgress.Stage? = nil
     ) {
+        let sourceTitle = sources.first(where: { $0.id == sourceID })?.title ?? "unknown"
+        quizLoopLog(
+            "quiz.state.persist",
+            fields: [
+                "source": sourceTitle,
+                "id": sourceID.logID,
+                "state": state.rawValue,
+                "stage": stage?.title ?? state.title,
+                "saved": savedCount,
+                "target": targetCount,
+                "detail": detail,
+                "error": error.isEmpty ? nil : error
+            ]
+        )
         let updatedAt = Date.now
         conversationStore.updateQuizBuildState(
             id: sourceID,
@@ -1693,11 +1835,22 @@ final class TutorEngine: ObservableObject {
         progress: Double,
         detail: String
     ) {
+        let sourceTitle = sources.first(where: { $0.id == sourceID })?.title ?? "unknown"
         let buildProgress = QuizBuildProgress(
             sourceID: sourceID,
             stage: stage,
             progress: progress,
             detail: detail
+        )
+        quizLoopLog(
+            "quiz.progress",
+            fields: [
+                "source": sourceTitle,
+                "id": sourceID.logID,
+                "stage": stage.title,
+                "percent": buildProgress.percentText,
+                "detail": detail
+            ]
         )
         quizBuildProgressBySourceID[sourceID] = buildProgress
         let savedCount = questions.filter { $0.sourceID == sourceID }.count
@@ -2077,6 +2230,46 @@ final class TutorEngine: ObservableObject {
         )
     }
 
+    func logQuizState(for source: StudySource?, reason: String, focusSubtopic: String? = nil) {
+        guard let source else {
+            quizLoopLog("quiz.snapshot", fields: ["reason": reason, "source": "nil"])
+            return
+        }
+
+        let plan = questionBankPlan(for: source)
+        let savedQuestions = questions.filter { $0.sourceID == source.id }.count
+        let scopedQuestions = quizCandidateScope(for: source, focusSubtopic: focusSubtopic)
+        let availableQuestions = availableQuizQuestions(in: scopedQuestions).count
+        let progress = quizBuildProgress(for: source)
+        let latestHistory = recentQuizHistory(for: source, limit: 1).first
+        let lastAttemptAge = lastQuizBuildAttemptBySourceID[source.id].map {
+            Int(Date.now.timeIntervalSince($0))
+        }
+        quizLoopLog(
+            "quiz.snapshot",
+            fields: [
+                "reason": reason,
+                "source": source.title,
+                "id": source.id.logID,
+                "status": source.status.rawValue,
+                "state": source.quizBuildState.rawValue,
+                "persistedSaved": source.quizBuildSavedCount,
+                "actualSaved": savedQuestions,
+                "target": max(source.quizBuildTargetCount, plan.targetQuestions),
+                "available": availableQuestions,
+                "minimum": minimumFreshQuizCount,
+                "isPreparing": preparingNextQuizSourceIDs.contains(source.id),
+                "progress": progress?.percentText,
+                "stage": progress?.stage.title,
+                "detail": progress?.detail,
+                "focus": focusSubtopic,
+                "modelReady": modelReadiness.isReady,
+                "latestQuizScore": latestHistory.map { Int(($0.score * 100).rounded()) },
+                "lastBuildAgeS": lastAttemptAge
+            ]
+        )
+    }
+
     func growthEvidence(for source: StudySource?) -> LearningGrowthEvidence {
         let questionIDs = Set(scopedQuestions(for: source).map(\.id))
         let scopedAttempts = attempts
@@ -2374,18 +2567,48 @@ final class TutorEngine: ObservableObject {
         remainingPasses: Int,
         bypassCooldown: Bool = false
     ) {
-        guard let source,
-              remainingPasses > 0,
-              modelReadiness.isReady,
-              preparingNextQuizSourceIDs.contains(source.id) == false
-        else { return }
-        guard bypassCooldown || canAttemptQuizBuild(for: source.id) else { return }
+        guard let source else {
+            quizLoopLog("quiz.prepare.skip", fields: ["reason": "no_source"])
+            return
+        }
+        guard remainingPasses > 0 else {
+            quizLoopLog("quiz.prepare.skip", fields: ["source": source.title, "id": source.id.logID, "reason": "no_passes"])
+            return
+        }
+        guard modelReadiness.isReady else {
+            quizLoopLog("quiz.prepare.skip", fields: ["source": source.title, "id": source.id.logID, "reason": "model_not_ready"])
+            return
+        }
+        guard preparingNextQuizSourceIDs.contains(source.id) == false else {
+            quizLoopLog("quiz.prepare.skip", fields: ["source": source.title, "id": source.id.logID, "reason": "already_preparing"])
+            return
+        }
+        guard bypassCooldown || canAttemptQuizBuild(for: source.id) else {
+            quizLoopLog("quiz.prepare.skip", fields: ["source": source.title, "id": source.id.logID, "reason": "cooldown"])
+            return
+        }
 
         let scoped = quizCandidateScope(for: source, focusSubtopic: focusSubtopic)
-        guard scoped.isEmpty == false else { return }
+        guard scoped.isEmpty == false else {
+            quizLoopLog("quiz.prepare.skip", fields: ["source": source.title, "id": source.id.logID, "reason": "no_scoped_questions", "focus": focusSubtopic])
+            return
+        }
 
         let available = availableQuizQuestions(in: scoped)
-        guard shouldPrepareNextQuiz(for: source, scoped: scoped, available: available) else { return }
+        guard shouldPrepareNextQuiz(for: source, scoped: scoped, available: available) else {
+            quizLoopLog(
+                "quiz.prepare.skip",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "reason": "already_enough_available",
+                    "available": available.count,
+                    "scoped": scoped.count,
+                    "focus": focusSubtopic
+                ]
+            )
+            return
+        }
 
         let latestAttemptsByQuestion = latestAttempts()
         let recentOutcome = scoped
@@ -2406,14 +2629,37 @@ final class TutorEngine: ObservableObject {
             quizOutcome: Array(recentOutcome),
             focusSubtopic: focusSubtopic
         ) != nil else {
+            quizLoopLog(
+                "quiz.prepare.skip",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "reason": "no_expansion_plan",
+                    "available": available.count,
+                    "scoped": scoped.count,
+                    "focus": focusSubtopic
+                ]
+            )
             return
         }
 
+        quizLoopLog(
+            "quiz.prepare.enqueue",
+            fields: [
+                "source": source.title,
+                "id": source.id.logID,
+                "available": available.count,
+                "scoped": scoped.count,
+                "focus": focusSubtopic,
+                "remainingPasses": remainingPasses,
+                "bypassCooldown": bypassCooldown
+            ]
+        )
         Task {
             _ = await topUpQuestionBank(
                 for: source,
                 reason: "prepare_next_quiz",
-                maxPasses: 3
+                maxPasses: isOnDeviceLiteRTLM ? 1 : 3
             )
 
             prepareNextQuizIfNeeded(
@@ -2436,10 +2682,6 @@ final class TutorEngine: ObservableObject {
 
         let bankPlan = questionBankPlan(for: source)
         let currentQuestionCount = questions.filter { $0.sourceID == source.id }.count
-        if currentQuestionCount < bankPlan.targetQuestions {
-            return true
-        }
-
         let untestedCount = scoped.filter { question in
             attempts.contains { $0.questionID == question.id } == false
         }.count
@@ -3302,10 +3544,16 @@ final class TutorEngine: ObservableObject {
             recordXP(for: .test, reason: "Completed a quiz session.")
             refreshJourneyAssignments()
             refreshLearningPlan()
-            buildNextQuizQuestionsInBackground(from: submissions, attempts: orderedAttempts)
         }
 
         return orderedAttempts
+    }
+
+    func prepareNextQuizAfterCompletedQuiz(
+        from submissions: [QuizAnswerSubmission],
+        attempts orderedAttempts: [QuestionAttempt]
+    ) {
+        buildNextQuizQuestionsInBackground(from: submissions, attempts: orderedAttempts)
     }
 
     private func buildNextQuizQuestionsInBackground(
@@ -3321,18 +3569,52 @@ final class TutorEngine: ObservableObject {
         guard let sourceID = quizOutcome.compactMap({ $0.question.sourceID }).first,
               let source = sources.first(where: { $0.id == sourceID }),
               modelReadiness.isReady
-        else { return }
+        else {
+            quizLoopLog(
+                "quiz.postquiz.skip",
+                fields: [
+                    "reason": "missing_source_or_model",
+                    "submissions": submissions.count,
+                    "attempts": orderedAttempts.count,
+                    "modelReady": modelReadiness.isReady
+                ]
+            )
+            return
+        }
         guard preparingNextQuizSourceIDs.contains(sourceID) == false
-        else { return }
+        else {
+            quizLoopLog("quiz.postquiz.skip", fields: ["source": source.title, "id": sourceID.logID, "reason": "already_preparing"])
+            return
+        }
 
         guard let expansionPlan = questionExpansionPlan(
             for: source,
             quizOutcome: quizOutcome,
             focusSubtopic: dominantSubtopic
         ) else {
+            quizLoopLog(
+                "quiz.postquiz.skip",
+                fields: [
+                    "source": source.title,
+                    "id": sourceID.logID,
+                    "reason": "no_expansion_plan",
+                    "outcome": quizOutcome.count,
+                    "focus": dominantSubtopic
+                ]
+            )
             return
         }
-        print("[QuizLoop][Tutor] Post-quiz expansion queued source=\(source.title) outcome=\(quizOutcome.count) targetNew=\(expansionPlan.targetNewQuestions) current=\(expansionPlan.currentQuestionCount)")
+        quizLoopLog(
+            "quiz.postquiz.enqueue",
+            fields: [
+                "source": source.title,
+                "id": sourceID.logID,
+                "outcome": quizOutcome.count,
+                "targetNew": expansionPlan.targetNewQuestions,
+                "current": expansionPlan.currentQuestionCount,
+                "focus": dominantSubtopic
+            ]
+        )
         preparingNextQuizSourceIDs.insert(sourceID)
         lastQuizBuildAttemptBySourceID[sourceID] = .now
         setQuizBuildProgress(
@@ -3624,7 +3906,11 @@ final class TutorEngine: ObservableObject {
         guard shouldRunQuestionBankTopUp(for: source, savedCount: savedCount, reason: reason) else { return }
 
         Task {
-            _ = await topUpQuestionBank(for: source, reason: reason)
+            _ = await topUpQuestionBank(
+                for: source,
+                reason: reason,
+                maxPasses: isOnDeviceLiteRTLM ? 1 : nil
+            )
         }
     }
 
@@ -3657,38 +3943,88 @@ final class TutorEngine: ObservableObject {
         reason: String,
         maxPasses: Int? = nil
     ) async -> Int {
-        guard modelReadiness.isReady else { return 0 }
-        guard preparingNextQuizSourceIDs.contains(source.id) == false else { return 0 }
+        guard modelReadiness.isReady else {
+            quizLoopLog("quiz.topup.skip", fields: ["source": source.title, "id": source.id.logID, "reason": reason, "skip": "model_not_ready"])
+            return 0
+        }
+        guard preparingNextQuizSourceIDs.contains(source.id) == false else {
+            quizLoopLog("quiz.topup.skip", fields: ["source": source.title, "id": source.id.logID, "reason": reason, "skip": "already_preparing"])
+            return 0
+        }
 
         let bankPlan = questionBankPlan(for: source)
         let chunks = learningChunks(from: learningText(for: source))
         var savedCount = questions.filter { $0.sourceID == source.id }.count
-        guard savedCount > 0, savedCount < bankPlan.targetQuestions, chunks.isEmpty == false else { return 0 }
-        guard shouldRunQuestionBankTopUp(for: source, savedCount: savedCount, reason: reason) else { return 0 }
+        guard savedCount > 0, savedCount < bankPlan.targetQuestions, chunks.isEmpty == false else {
+            quizLoopLog(
+                "quiz.topup.skip",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "reason": reason,
+                    "skip": "not_needed_or_no_seed",
+                    "saved": savedCount,
+                    "target": bankPlan.targetQuestions,
+                    "chunks": chunks.count
+                ]
+            )
+            return 0
+        }
+        guard shouldRunQuestionBankTopUp(for: source, savedCount: savedCount, reason: reason) else {
+            quizLoopLog(
+                "quiz.topup.skip",
+                fields: [
+                    "source": source.title,
+                    "id": source.id.logID,
+                    "reason": reason,
+                    "skip": "priority_or_policy",
+                    "saved": savedCount,
+                    "target": bankPlan.targetQuestions
+                ]
+            )
+            return 0
+        }
 
         preparingNextQuizSourceIDs.insert(source.id)
         lastQuizBuildAttemptBySourceID[source.id] = .now
         defer {
             preparingNextQuizSourceIDs.remove(source.id)
             clearQuizBuildProgress(for: source.id)
+            quizLoopLog("quiz.topup.cleanup", fields: ["source": source.title, "id": source.id.logID, "reason": reason])
         }
 
-        print("[QuizLoop][Tutor] Question bank top-up started source=\(source.title) reason=\(reason) saved=\(savedCount) target=\(bankPlan.targetQuestions) chunks=\(chunks.count)")
+        quizLoopLog(
+            "quiz.topup.start",
+            fields: [
+                "source": source.title,
+                "id": source.id.logID,
+                "reason": reason,
+                "saved": savedCount,
+                "target": bankPlan.targetQuestions,
+                "chunks": chunks.count,
+                "maxPasses": maxPasses,
+                "onDevice": isOnDeviceLiteRTLM
+            ]
+        )
         var totalAdded = 0
-        let passCount = min(maxPasses ?? chunks.count, chunks.count)
+        let defaultPassCount = isOnDeviceLiteRTLM ? 1 : chunks.count
+        let passCount = min(maxPasses ?? defaultPassCount, chunks.count)
         let averageQuestionsPerChunk = max(1, Int(ceil(Double(bankPlan.targetQuestions) / Double(max(chunks.count, 1)))))
         let startIndex = min(chunks.count - 1, max(0, savedCount / averageQuestionsPerChunk))
 
         for passIndex in 0..<passCount {
             guard savedCount < bankPlan.targetQuestions else { break }
             if shouldRunQuestionBankTopUp(for: source, savedCount: savedCount, reason: reason) == false {
-                print("[QuizLoop][Tutor] Question bank top-up yielded source=\(source.title) reason=\(reason)")
+                quizLoopLog("quiz.topup.yield", fields: ["source": source.title, "id": source.id.logID, "reason": reason, "saved": savedCount, "target": bankPlan.targetQuestions])
                 break
             }
 
             let chunk = chunks[(startIndex + passIndex) % chunks.count]
             let remaining = bankPlan.targetQuestions - savedCount
-            let targetCount = min(remaining, max(4, min(chunk.plan.targetQuestions, 8)))
+            let targetCount = isOnDeviceLiteRTLM
+                ? min(remaining, minimumFreshQuizCount)
+                : min(remaining, max(4, min(chunk.plan.targetQuestions, 8)))
+            let chunkText = isOnDeviceLiteRTLM ? String(chunk.text.prefix(2_200)) : chunk.text
             let progress = min(0.9, 0.18 + (Double(passIndex) / Double(max(passCount, 1))) * 0.68)
             setQuizBuildProgress(
                 source.id,
@@ -3700,7 +4036,7 @@ final class TutorEngine: ObservableObject {
             do {
                 let generatedQuestions = try await requestMultipleChoiceRescueQuestions(
                     for: source,
-                    noteText: chunk.text,
+                    noteText: chunkText,
                     targetCount: targetCount
                 )
                 let addedCount = appendFreshQuestions(generatedQuestions, sourceID: source.id)
@@ -3711,9 +4047,20 @@ final class TutorEngine: ObservableObject {
                     savedCount: savedCount,
                     targetCount: bankPlan.targetQuestions
                 )
-                print("[QuizLoop][Tutor] Question bank top-up chunk source=\(source.title) part=\(chunk.index)/\(chunks.count) requested=\(targetCount) generated=\(generatedQuestions.count) added=\(addedCount) total=\(savedCount)")
+                quizLoopLog(
+                    "quiz.topup.chunk.success",
+                    fields: [
+                        "source": source.title,
+                        "id": source.id.logID,
+                        "part": "\(chunk.index)/\(chunks.count)",
+                        "requested": targetCount,
+                        "generated": generatedQuestions.count,
+                        "added": addedCount,
+                        "total": savedCount
+                    ]
+                )
             } catch {
-                print("[QuizLoop][Tutor] Question bank top-up chunk failed source=\(source.title) part=\(chunk.index)/\(chunks.count) error=\(error.localizedDescription)")
+                quizLoopLog("quiz.topup.chunk.failure", fields: ["source": source.title, "id": source.id.logID, "part": "\(chunk.index)/\(chunks.count)", "error": error.localizedDescription])
             }
         }
 
@@ -3725,11 +4072,13 @@ final class TutorEngine: ObservableObject {
             savedCount: savedCount,
             stage: .saving
         )
-        updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .processing)
-        print("[QuizLoop][Tutor] Question bank top-up finished source=\(source.title) added=\(totalAdded) total=\(savedCount) target=\(bankPlan.targetQuestions)")
+        let minimumUsableQuestions = min(bankPlan.minimumQuestions, minimumFreshQuizCount)
+        updateSourceStatus(source.id, status: savedCount >= minimumUsableQuestions ? .ready : .processing)
+        quizLoopLog("quiz.topup.finish", fields: ["source": source.title, "id": source.id.logID, "added": totalAdded, "total": savedCount, "target": bankPlan.targetQuestions])
         if savedCount < bankPlan.targetQuestions, totalAdded > 0 {
             Task {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                let delay: UInt64 = isOnDeviceLiteRTLM ? 20_000_000_000 : 1_500_000_000
+                try? await Task.sleep(nanoseconds: delay)
                 _ = await topUpQuestionBank(
                     for: source,
                     reason: "\(reason)_continue",
