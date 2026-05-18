@@ -60,6 +60,9 @@ struct SettingsView: View {
                 onDownloadDefaultModel: {
                     assistant.downloadDefaultOnDeviceModel()
                 },
+                onDownloadLiteRTModel: {
+                    assistant.downloadDefaultLiteRTModel()
+                },
                 onSave: { configuration in
                     await assistant.updateModelConfiguration(configuration)
                 },
@@ -265,6 +268,7 @@ private struct ModelRuntimeSheet: View {
     let configuration: ModelRuntimeConfiguration
     let downloadState: ModelDownloadState
     let onDownloadDefaultModel: () -> Void
+    let onDownloadLiteRTModel: () -> Void
     let onSave: (ModelRuntimeConfiguration) async -> Void
     let onCheckAgain: () async -> Void
 
@@ -286,6 +290,7 @@ private struct ModelRuntimeSheet: View {
         configuration: ModelRuntimeConfiguration,
         downloadState: ModelDownloadState,
         onDownloadDefaultModel: @escaping () -> Void,
+        onDownloadLiteRTModel: @escaping () -> Void,
         onSave: @escaping (ModelRuntimeConfiguration) async -> Void,
         onCheckAgain: @escaping () async -> Void
     ) {
@@ -293,6 +298,7 @@ private struct ModelRuntimeSheet: View {
         self.configuration = configuration
         self.downloadState = downloadState
         self.onDownloadDefaultModel = onDownloadDefaultModel
+        self.onDownloadLiteRTModel = onDownloadLiteRTModel
         self.onSave = onSave
         self.onCheckAgain = onCheckAgain
         _mode = State(initialValue: configuration.mode)
@@ -396,9 +402,24 @@ private struct ModelRuntimeSheet: View {
                         if selectedModelIsDownloaded {
                             Label("Model file ready", systemImage: "checkmark.circle.fill")
                                 .foregroundStyle(.green)
+                        } else if downloadState.isDownloading {
+                            Label("Downloading Gemma...", systemImage: "hourglass")
+                                .foregroundStyle(.secondary)
                         } else {
                             Label("Model file missing", systemImage: "exclamationmark.triangle")
                                 .foregroundStyle(.orange)
+                        }
+
+                        if let modelDownloadProgress = downloadState.progress {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ProgressView(value: modelDownloadProgress)
+                                    .progressViewStyle(.linear)
+
+                                Text("\(Int((modelDownloadProgress * 100).rounded()))% downloaded")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 2)
                         }
 
                         SetupStepRow(
@@ -418,6 +439,23 @@ private struct ModelRuntimeSheet: View {
                         } label: {
                             Label("Import LiteRT-LM Model", systemImage: "folder")
                         }
+
+                        Button {
+                            focusedField = nil
+                            mode = .onDevice
+                            modelName = GoogleAIEdgeModelStore.defaultDownloadName
+                            onDownloadLiteRTModel()
+                        } label: {
+                            Label(
+                                downloadState.isDownloading ? "Downloading Gemma..." : "Download Gemma 4 E2B",
+                                systemImage: downloadState.isDownloading ? "hourglass" : "arrow.down.circle"
+                            )
+                        }
+                        .disabled(downloadState.isDownloading)
+
+                        Text("This downloads the official LiteRT-LM model file to this iPhone. The app still needs the public Swift LiteRT-LM runtime before it can run this file directly.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 } else {
                     Section("Use This iPhone Offline") {

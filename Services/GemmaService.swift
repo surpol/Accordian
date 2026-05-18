@@ -152,6 +152,9 @@ final class GoogleAIEdgeGemmaService: GemmaService {
         #if canImport(MediaPipeTasksGenAI)
         guard let modelPath else { return false }
         try GoogleAIEdgeModelStore.validateMediaPipeModel(atPath: modelPath, modelName: modelFileName)
+        if modelFileName.lowercased().hasSuffix(".litertlm") {
+            throw GemmaServiceError.aiEdgeRuntimeUnavailable
+        }
         return true
         #else
         throw GemmaServiceError.aiEdgeRuntimeUnavailable

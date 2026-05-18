@@ -461,6 +461,52 @@ final class TutorEngine: ObservableObject {
         }
     }
 
+    func downloadDefaultLiteRTModel() {
+        guard modelDownloadTask == nil else { return }
+
+        if GoogleAIEdgeModelStore.isModelAvailable(named: GoogleAIEdgeModelStore.defaultDownloadName) {
+            modelDownloadState = ModelDownloadState(phase: .installed(GoogleAIEdgeModelStore.defaultDownloadName))
+            modelDownloadTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.updateModelConfiguration(
+                    ModelRuntimeConfiguration(
+                        mode: .onDevice,
+                        serverURLString: self.modelConfiguration.serverURLString,
+                        modelName: GoogleAIEdgeModelStore.defaultDownloadName
+                    )
+                )
+                self.modelDownloadTask = nil
+            }
+            return
+        }
+
+        modelDownloadState = ModelDownloadState(phase: .downloading(0))
+        modelDownloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                let downloadedFileName = try await GoogleAIEdgeModelStore.downloadDefaultModel { progress in
+                    await MainActor.run { [weak self] in
+                        self?.modelDownloadState = ModelDownloadState(phase: .downloading(progress))
+                    }
+                }
+
+                await self.updateModelConfiguration(
+                    ModelRuntimeConfiguration(
+                        mode: .onDevice,
+                        serverURLString: self.modelConfiguration.serverURLString,
+                        modelName: downloadedFileName
+                    )
+                )
+                self.modelDownloadState = ModelDownloadState(phase: .installed(downloadedFileName))
+            } catch {
+                self.modelDownloadState = ModelDownloadState(phase: .failed(error.localizedDescription))
+            }
+
+            self.modelDownloadTask = nil
+        }
+    }
+
     private func modelReply(
         to messages: [GemmaMessage],
         timeout: TimeInterval? = nil,
