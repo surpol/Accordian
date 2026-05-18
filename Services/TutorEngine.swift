@@ -946,7 +946,8 @@ final class TutorEngine: ObservableObject {
             conversationStore.replaceQuestions(for: source.id, questions: finalDeduplicatedQuestions)
             questions = conversationStore.loadQuestions()
             updateSourceStatus(source.id, status: .ready)
-            if finalDeduplicatedQuestions.count < bankPlan.targetQuestions,
+            if isOnDeviceLiteRTLM == false,
+               finalDeduplicatedQuestions.count < bankPlan.targetQuestions,
                let expansionPlan = questionExpansionPlan(for: source, quizOutcome: []),
                preparingNextQuizSourceIDs.contains(source.id) == false {
                 updateQuizBuildState(
@@ -1056,6 +1057,7 @@ final class TutorEngine: ObservableObject {
                 targetCount: minimumFreshQuizCount
             )
             combinedQuestions.append(contentsOf: firstQuizQuestions)
+            print("[QuizLoop][Tutor] First quiz seed saved count=\(firstQuizQuestions.count) source=\(source.title)")
             savePartialLearningObjects(
                 topics: combinedTopics,
                 segments: combinedSegments,
@@ -1068,10 +1070,51 @@ final class TutorEngine: ObservableObject {
                 targetCount: plan.minimumQuestions
             )
             if combinedQuestions.count >= minimumFreshQuizCount {
-                return (combinedTopics, combinedSegments, combinedQuestions)
+                let lightweightObjects = lightweightLearningObjects(from: combinedQuestions, source: source)
+                return (lightweightObjects.topics, lightweightObjects.segments, combinedQuestions)
             }
         } catch {
+            print("[QuizLoop][Tutor] First quiz seed failed source=\(source.title) error=\(error.localizedDescription)")
             // Continue with richer extraction; the note only fails if no model questions can be saved.
+        }
+
+        if isOnDeviceLiteRTLM {
+            if combinedQuestions.count < minimumFreshQuizCount, fullText.count > 1_800 {
+                do {
+                    setQuizBuildProgress(
+                        source.id,
+                        stage: .extracting,
+                        progress: 0.24,
+                        detail: "Creating more starter questions."
+                    )
+                    let secondQuizQuestions = try await requestMultipleChoiceRescueQuestions(
+                        for: source,
+                        noteText: String(fullText.dropFirst(1_800).prefix(1_800)),
+                        targetCount: minimumFreshQuizCount
+                    )
+                    combinedQuestions.append(contentsOf: secondQuizQuestions)
+                    combinedQuestions = deduplicatedQuizQuestions(combinedQuestions)
+                    print("[QuizLoop][Tutor] Second quiz seed saved total=\(combinedQuestions.count) source=\(source.title)")
+                    savePartialLearningObjects(
+                        topics: combinedTopics,
+                        segments: combinedSegments,
+                        questions: combinedQuestions,
+                        sourceID: source.id
+                    )
+                    updateSavedQuizBuildProgress(
+                        sourceID: source.id,
+                        savedCount: combinedQuestions.count,
+                        targetCount: plan.minimumQuestions
+                    )
+                } catch {
+                    print("[QuizLoop][Tutor] Second quiz seed failed source=\(source.title) error=\(error.localizedDescription)")
+                }
+            }
+
+            if combinedQuestions.isEmpty == false {
+                let lightweightObjects = lightweightLearningObjects(from: combinedQuestions, source: source)
+                return (lightweightObjects.topics, lightweightObjects.segments, combinedQuestions)
+            }
         }
 
         if fullText.count > 1_200 {
@@ -1192,6 +1235,54 @@ final class TutorEngine: ObservableObject {
         return (combinedTopics, combinedSegments, combinedQuestions)
     }
 
+    private var isOnDeviceLiteRTLM: Bool {
+        modelConfiguration.modelName.lowercased().hasSuffix(".litertlm")
+    }
+
+    private func lightweightLearningObjects(
+        from questions: [LearningQuestion],
+        source: StudySource
+    ) -> (topics: [LearningTopic], segments: [LearningSegment]) {
+        let groupedByTopic = Dictionary(grouping: questions) { question in
+            cleaned(question.topicTitle, fallback: source.title)
+        }
+
+        var topics: [LearningTopic] = []
+        var segments: [LearningSegment] = []
+
+        for (topicTitle, topicQuestions) in groupedByTopic {
+            let topic = LearningTopic(
+                sourceID: source.id,
+                title: topicTitle,
+                summary: "QuizLoop created starter checks from \(source.title)."
+            )
+            topics.append(topic)
+
+            let groupedBySubtopic = Dictionary(grouping: topicQuestions) { question in
+                cleaned(question.subtopicTitle, fallback: "Core ideas")
+            }
+
+            for (subtopicTitle, subtopicQuestions) in groupedBySubtopic {
+                let representative = subtopicQuestions.first
+                let segmentText = representative?.answer ?? subtopicTitle
+                segments.append(
+                    LearningSegment(
+                        sourceID: source.id,
+                        topicID: topic.id,
+                        topicTitle: topic.title,
+                        subtopicTitle: subtopicTitle,
+                        text: segmentText,
+                        evidence: representative?.prompt ?? segmentText,
+                        importance: representative?.importance ?? 0.7,
+                        difficulty: representative?.difficulty ?? 0.5
+                    )
+                )
+            }
+        }
+
+        return (topics, segments)
+    }
+
     private func savePartialLearningObjects(
         topics partialTopics: [LearningTopic],
         segments partialSegments: [LearningSegment],
@@ -1247,7 +1338,9 @@ final class TutorEngine: ObservableObject {
         targetCount: Int
     ) async throws -> [LearningQuestion] {
         let clampedTarget = min(max(targetCount, 1), 8)
-        let response = try await withTimeout(seconds: 25) {
+        let timeout: TimeInterval = isOnDeviceLiteRTLM ? 75 : 25
+        print("[QuizLoop][Tutor] Requesting MC seed questions source=\(source.title) target=\(clampedTarget) noteChars=\(noteText.count)")
+        let response = try await withTimeout(seconds: UInt64(ceil(timeout))) {
             try await self.modelReply(to: [
                 GemmaMessage(
                     role: "system",
@@ -1281,11 +1374,18 @@ final class TutorEngine: ObservableObject {
                     \(noteText)
                     """
                 )
-            ], timeout: 25, taskType: "quiz_generation", promptVersion: "multiple_choice_rescue.v2")
+            ], timeout: timeout, taskType: "quiz_generation", promptVersion: "multiple_choice_rescue.v2")
         }
 
-        let expansion = try parseFreshQuestionExpansion(from: response)
-        return materializeFreshQuestions(expansion.questions, source: source)
+        do {
+            let expansion = try parseFreshQuestionExpansion(from: response)
+            let materialized = materializeFreshQuestions(expansion.questions, source: source)
+            print("[QuizLoop][Tutor] MC seed parsed raw=\(expansion.questions.count) usable=\(materialized.count) source=\(source.title)")
+            return materialized
+        } catch {
+            print("[QuizLoop][Tutor] MC seed parse failed source=\(source.title) error=\(error.localizedDescription) responsePrefix=\(String(response.prefix(500)))")
+            throw error
+        }
     }
 
     private func continueProcessingPendingSources() async {
@@ -3243,6 +3343,11 @@ final class TutorEngine: ObservableObject {
             clearQuizBuildProgress(for: source.id)
         }
 
+        guard isOnDeviceLiteRTLM == false else {
+            print("[QuizLoop][Tutor] Skipping heavy quiz expansion on-device source=\(source.title)")
+            return 0
+        }
+
         let memoryContext = quizMemoryContextJSON(
             source: source,
             expansionPlan: expansionPlan,
@@ -3260,6 +3365,7 @@ final class TutorEngine: ObservableObject {
             progress: 0.35,
             detail: "Gemma is creating fresh questions."
         )
+        print("[QuizLoop][Tutor] Expanding quiz bank source=\(source.title) id=\(source.id) promptChars=\(prompt.count)")
 
         do {
             let response = try await withTimeout(seconds: 25) {
@@ -3301,8 +3407,10 @@ final class TutorEngine: ObservableObject {
             )
             clearQuizBuildProgress(for: source.id)
             updateSourceStatus(source.id, status: savedCount >= bankPlan.minimumQuestions ? .ready : .processing)
+            print("[QuizLoop][Tutor] Quiz bank expansion saved added=\(addedCount) total=\(savedCount) source=\(source.title)")
             return addedCount
         } catch {
+            print("[QuizLoop][Tutor] Quiz bank expansion failed source=\(source.title) error=\(error.localizedDescription)")
             let savedCount = questions.filter { $0.sourceID == source.id }.count
             let bankPlan = questionBankPlan(for: source)
             updateQuizBuildState(

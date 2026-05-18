@@ -11,6 +11,9 @@ import LiteRTLM
 #if canImport(LiteRTLMSwift)
 import LiteRTLMSwift
 #endif
+#if canImport(CLiteRTLM)
+import CLiteRTLM
+#endif
 
 struct GemmaMessage: Codable, Equatable {
     let role: String
@@ -255,7 +258,28 @@ final class GoogleAIEdgeGemmaService: GemmaService {
     }
 
     private func replyWithVendoredLiteRTLM(to messages: [GemmaMessage]) async throws -> String {
-        #if canImport(LiteRTLMSwift)
+        #if canImport(CLiteRTLM)
+        guard let modelPath else {
+            throw GemmaServiceError.modelFileMissing(modelFileName)
+        }
+        try GoogleAIEdgeModelStore.validateMediaPipeModel(atPath: modelPath, modelName: modelFileName)
+
+        let prompt = Self.gemma4Prompt(from: messages)
+        let tokenLimit = min(max(512, maxTokens), 900)
+        let temperature = temperature
+        let randomSeed = randomSeed
+
+        print("[QuizLoop][Gemma] LiteRT-LM text-only start model=\(URL(fileURLWithPath: modelPath).lastPathComponent) promptChars=\(prompt.count) maxTokens=\(tokenLimit)")
+        let response = try await LiteRTLMTextOnlyRunner.shared.generate(
+            modelPath: modelPath,
+            prompt: prompt,
+            temperature: temperature,
+            maxTokens: tokenLimit,
+            seed: randomSeed
+        )
+        print("[QuizLoop][Gemma] LiteRT-LM text-only finished chars=\(response.count)")
+        return response.trimmingCharacters(in: .whitespacesAndNewlines)
+        #elseif canImport(LiteRTLMSwift)
         guard let modelPath else {
             throw GemmaServiceError.modelFileMissing(modelFileName)
         }
@@ -265,6 +289,7 @@ final class GoogleAIEdgeGemmaService: GemmaService {
         let tokenLimit = max(512, maxTokens)
         let temperature = temperature
 
+        print("[QuizLoop][Gemma] LiteRTLMSwift fallback start model=\(URL(fileURLWithPath: modelPath).lastPathComponent) promptChars=\(prompt.count) maxTokens=\(tokenLimit)")
         let engine = LiteRTLMEngine(modelPath: URL(fileURLWithPath: modelPath), backend: "cpu")
         try await engine.load()
         return try await engine.generate(
@@ -309,6 +334,183 @@ final class GoogleAIEdgeGemmaService: GemmaService {
         return parts.joined(separator: "\n")
     }
 }
+
+#if canImport(CLiteRTLM)
+private enum LiteRTLMTextOnlyError: LocalizedError {
+    case engineSettingsFailed
+    case engineCreationFailed
+    case sessionConfigFailed
+    case sessionCreationFailed
+    case generationFailed
+    case emptyResponse
+
+    var errorDescription: String? {
+        switch self {
+        case .engineSettingsFailed:
+            "LiteRT-LM could not create text-only engine settings."
+        case .engineCreationFailed:
+            "LiteRT-LM could not create a text-only engine."
+        case .sessionConfigFailed:
+            "LiteRT-LM could not create a text session configuration."
+        case .sessionCreationFailed:
+            "LiteRT-LM could not create a text session."
+        case .generationFailed:
+            "LiteRT-LM did not return a response."
+        case .emptyResponse:
+            "LiteRT-LM returned an empty response."
+        }
+    }
+}
+
+private final class LiteRTLMTextOnlyRunner: @unchecked Sendable {
+    static let shared = LiteRTLMTextOnlyRunner()
+
+    private let inferenceQueue = DispatchQueue(label: "ai.quizloop.litertlm.text", qos: .userInitiated)
+    private var loadedModelPath: String?
+    private var engine: OpaquePointer?
+
+    deinit {
+        if let engine {
+            litert_lm_engine_delete(engine)
+        }
+    }
+
+    func generate(
+        modelPath: String,
+        prompt: String,
+        temperature: Float,
+        maxTokens: Int,
+        seed: Int
+    ) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            inferenceQueue.async {
+                do {
+                    let output = try self.generateSync(
+                        modelPath: modelPath,
+                        prompt: prompt,
+                        temperature: temperature,
+                        maxTokens: maxTokens,
+                        seed: seed
+                    )
+                    continuation.resume(returning: output)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func generateSync(
+        modelPath: String,
+        prompt: String,
+        temperature: Float,
+        maxTokens: Int,
+        seed: Int
+    ) throws -> String {
+        let engine = try loadedEngine(modelPath: modelPath)
+
+        guard let sessionConfig = litert_lm_session_config_create() else {
+            throw LiteRTLMTextOnlyError.sessionConfigFailed
+        }
+        defer { litert_lm_session_config_delete(sessionConfig) }
+
+        litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(maxTokens))
+        var samplerParams = LiteRtLmSamplerParams(
+            type: kTopP,
+            top_k: 40,
+            top_p: 0.95,
+            temperature: temperature,
+            seed: Int32(seed)
+        )
+        litert_lm_session_config_set_sampler_params(sessionConfig, &samplerParams)
+
+        guard let session = litert_lm_engine_create_session(engine, sessionConfig) else {
+            throw LiteRTLMTextOnlyError.sessionCreationFailed
+        }
+        defer { litert_lm_session_delete(session) }
+
+        let output = prompt.withCString { textPointer -> String? in
+            var input = InputData(
+                type: kInputText,
+                data: UnsafeRawPointer(textPointer),
+                size: strlen(textPointer)
+            )
+            guard let responses = litert_lm_session_generate_content(session, &input, 1) else {
+                return nil
+            }
+            defer { litert_lm_responses_delete(responses) }
+
+            let candidateCount = litert_lm_responses_get_num_candidates(responses)
+            guard candidateCount > 0,
+                  let responsePointer = litert_lm_responses_get_response_text_at(responses, 0) else {
+                return ""
+            }
+            return String(cString: responsePointer)
+        }
+
+        guard let output else {
+            throw LiteRTLMTextOnlyError.generationFailed
+        }
+
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw LiteRTLMTextOnlyError.emptyResponse
+        }
+
+        if let benchmark = litert_lm_session_get_benchmark_info(session) {
+            let initTime = litert_lm_benchmark_info_get_total_init_time_in_second(benchmark)
+            let ttft = litert_lm_benchmark_info_get_time_to_first_token(benchmark)
+            print("[QuizLoop][Gemma] LiteRT-LM benchmark init=\(String(format: "%.2f", initTime))s ttft=\(String(format: "%.2f", ttft))s")
+            litert_lm_benchmark_info_delete(benchmark)
+        }
+
+        return trimmed
+    }
+
+    private func loadedEngine(modelPath: String) throws -> OpaquePointer {
+        if let engine, loadedModelPath == modelPath {
+            return engine
+        }
+
+        if let engine {
+            litert_lm_engine_delete(engine)
+            self.engine = nil
+            loadedModelPath = nil
+        }
+
+        do {
+            litert_lm_set_min_log_level(1)
+
+            guard let settings = litert_lm_engine_settings_create(modelPath, "cpu", nil, nil) else {
+                throw LiteRTLMTextOnlyError.engineSettingsFailed
+            }
+            defer { litert_lm_engine_settings_delete(settings) }
+
+            let cacheDir = FileManager.default
+                .urls(for: .cachesDirectory, in: .userDomainMask)
+                .first!
+                .appendingPathComponent("litertlm_text_cache", isDirectory: true)
+            try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+
+            litert_lm_engine_settings_set_max_num_tokens(settings, 4096)
+            litert_lm_engine_settings_set_cache_dir(settings, cacheDir.path)
+            litert_lm_engine_settings_enable_benchmark(settings)
+
+            guard let engine = litert_lm_engine_create(settings) else {
+                throw LiteRTLMTextOnlyError.engineCreationFailed
+            }
+
+            self.engine = engine
+            loadedModelPath = modelPath
+            return engine
+        } catch {
+            loadedModelPath = nil
+            self.engine = nil
+            throw error
+        }
+    }
+}
+#endif
 
 final class LlamaCppGemmaService: GemmaService {
     let modelFileName: String
